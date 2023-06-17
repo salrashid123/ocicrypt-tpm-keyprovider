@@ -1,0 +1,10 @@
+{
+  "key-providers": {
+    "tpm": {
+      "cmd": {
+        "path": "/path/to/tpm_oci_crypt",
+        "args": []
+      }
+    }
+  }
+}

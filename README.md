@@ -62,7 +62,7 @@ skopeo copy  --encrypt-layer=-1 \
 
 #### Decrypt
 
-Decryption must be done on the same TPM where the image resides.
+Decryption must be done on the same TPM where that ekPub exists.
 
 First copy the `tpm_oci_crypt` binary onto the image and create an `ocicrypt.json` file that point to that
 

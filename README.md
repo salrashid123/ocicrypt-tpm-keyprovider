@@ -44,6 +44,59 @@ In the end, the image itself is encrypted as shown below (in this case, just the
 
 ---
 
+### QuickStart
+
+#### Encrypt
+
+To encrypt an image, acquire the PEM format of the ekPub file from the certificate and the PCR value list you want to bind to.
+
+You can see an example of how to b64 encode the PEM file and the format to specify the PCRs.  Export them as `EKPUB` and `PCRLIST` variables.
+
+from there, encrypt an image (eg `app:server` on the local docker daemon) and copy the encrypted image to a registry (in the example below, its my dockerhub image)
+
+```bash
+skopeo copy  --encrypt-layer=-1 \
+  --encryption-key="provider:tpm:tpm://ek?mode=encrypt&pub=$EKPUB&pcrs=$PCRLIST" \
+   docker-daemon:app:server docker://docker.io/salrashid123/ociencryptedapp:server
+```
+
+#### Decrypt
+
+Decryption must be done on the same TPM where the image resides.
+
+First copy the `tpm_oci_crypt` binary onto the image and create an `ocicrypt.json` file that point to that
+
+
+```json
+{
+  "key-providers": {
+    "tpm": {
+      "cmd": {
+        "path": "/root/ocicrypt-tpm-keyprovider/plugin/tpm_oci_crypt",
+        "args": ["--tpmPath=/dev/tpm0"]
+      }
+    }
+  }
+}
+```
+
+from there, specify the env vars that point to that config file
+
+```bash
+export OCICRYPT_KEYPROVIDER_CONFIG=/path/to/ocicrypt.json
+
+skopeo copy --decryption-key="provider:tpm:tpm://ek?mode=decrypt" \
+    docker://docker.io/salrashid123/ociencryptedapp:server docker://localhost:5000/app:decrypted
+```
+
+(ofcourse the command above won't work for you since you dont' have the key i used for that dockerhub image..but you get the  idea)
+
+Just a note on using OCICrypt:  the image that is decrypted ...is decrypted so anyone who runs the command above can 'just copy' the image somewhere else, unarmored.  
+
+Also note the PCR value binding:  if the pcr values change on the VM an _already_ downloaded/decrypted container will continue to run (since its already unarmored, etc)
+
+---
+
 ### Setup
 
 Before we jump in on using it live, lets demonstrate it running on a VM that has a TPM

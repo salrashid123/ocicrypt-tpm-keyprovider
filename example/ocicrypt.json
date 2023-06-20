@@ -5,6 +5,9 @@
         "path": "/path/to/tpm_oci_crypt",
         "args": []
       }
+    },
+    "grpc-keyprovider": {
+      "grpc": "localhost:50051"
     }
   }
 }

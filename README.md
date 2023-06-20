@@ -228,8 +228,10 @@ Build a small test application which we will encrypt
 cd example/
 docker build -t app:server .
 
+export SSL_CERT_FILE=certs/tls-ca-chain.pem
+skopeo copy   docker-daemon:app:server  docker://localhost:5000/app:server
 # inspect the image; note its not encrypted
-skopeo inspect docker-daemon:app:server
+skopeo inspect  docker://localhost:5000/app:server
 ```
 
 ### Encrypt
@@ -238,7 +240,7 @@ Either build the provider or use one from the `Releases` page in the repo (to bu
 
 ```bash
 cd plugin/
-go build -o tpm_oci_crypt
+go build -o tpm_oci_crypt main.go
 ```
 
 and set the path to the binary you created, eg:
@@ -274,7 +276,7 @@ echo $EKPUB
 echo $PCRLIST
 
 ## now encrypt the last layer and copy to the docker daemon via skopeo:
-skopeo copy  --encrypt-layer=-1 --encryption-key="provider:tpm:tpm://ek?mode=encrypt&pub=$EKPUB&pcrs=$PCRLIST"    docker-daemon:app:server docker://localhost:5000/app:encrypted
+skopeo copy  --encrypt-layer=-1 --encryption-key="provider:tpm:tpm://ek?mode=encrypt&pub=$EKPUB&pcrs=$PCRLIST"   docker://localhost:5000/app:server docker://localhost:5000/app:encrypted
 
 ## if you inspect the node, you should see something like the following that shows encrypted layers
 skopeo inspect docker://localhost:5000/app:encrypted
@@ -419,6 +421,8 @@ docker: failed to register layer: unexpected EOF.
 this wont' work because you dont have the key so copty the encrypted image over
 
 ```bash
+cd example/
+export SSL_CERT_FILE=certs/tls-ca-chain.pem
 skopeo copy --decryption-key="provider:tpm:tpm://ek?mode=decrypt"  docker://localhost:5000/app:encrypted  docker://localhost:5000/app:decrypted
 ```
 
@@ -472,3 +476,52 @@ no suitable key found for decrypting layer key:
 : exit status 1
 ```
 
+
+### Setup gRPC OCI KMS provider
+
+Included in this repo is a grpc service which you can use as the key provider.
+
+Basically, its the same as calling the binary except that it calls a gRPC server you run separately.
+
+Note, the existing implementation _does not use TLS_!.  You would definitely want to secure access to this service.
+
+To use, start the server
+
+```bash
+cd grpc/
+
+go run server.go --tpmPath=/dev/tpm0
+```
+
+set the `OCICRYPT_KEYPROVIDER_CONFIG` file to use
+
+```json
+{
+  "key-providers": {
+    "tpm": {
+      "cmd": {
+        "path": "/path/to/tpm_oci_crypt",
+        "args": []
+      }
+    },
+    "grpc-keyprovider": {
+      "grpc": "localhost:50051"
+    }
+  }
+}
+```
+
+Finally invoke the endpoints (note `provider:grpc-keyprovider` is used below)
+
+```bash
+cd example/
+export SSL_CERT_FILE=certs/tls-ca-chain.pem
+
+skopeo copy --encrypt-layer -1 \
+  --encryption-key="provider:grpc-keyprovider:tpm://ek?mode=encrypt&pub=$EKPUB&pcrs=$PCRLIST" \
+   docker-daemon:app:server docker://localhost:5000/app:encrypted
+
+skopeo copy --dest-tls-verify=false \
+  --decryption-key=provider:grpc-keyprovider:tpm://ek?mode=decrypt \
+    docker://localhost:5000/app:encrypted docker://localhost:5000/app:decrypted
+```

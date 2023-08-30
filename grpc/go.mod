@@ -3,10 +3,9 @@ module github.com/salrashid123/ocicrypt-kms-keyprovider/grpc
 go 1.19
 
 require (
-	github.com/cenkalti/backoff v2.2.1+incompatible
 	github.com/containers/ocicrypt v1.1.7
-	github.com/google/go-tpm v0.3.3
-	github.com/google/go-tpm-tools v0.3.12
+	github.com/google/go-tpm v0.9.0
+	github.com/google/go-tpm-tools v0.3.13-0.20230620182252-4639ecce2aba
 	golang.org/x/net v0.10.0
 	google.golang.org/grpc v1.55.0
 	google.golang.org/protobuf v1.30.0
@@ -14,7 +13,10 @@ require (
 
 require (
 	github.com/golang/protobuf v1.5.3 // indirect
+	github.com/google/certificate-transparency-go v1.1.2 // indirect
+	github.com/google/go-attestation v0.4.4-0.20230613144338-a9b6eb1eb888 // indirect
 	github.com/google/go-sev-guest v0.6.1 // indirect
+	github.com/google/go-tspi v0.3.0 // indirect
 	github.com/google/logger v1.1.1 // indirect
 	github.com/google/uuid v1.3.0 // indirect
 	github.com/miekg/pkcs11 v1.1.1 // indirect
@@ -23,6 +25,8 @@ require (
 	github.com/sirupsen/logrus v1.7.0 // indirect
 	github.com/stefanberger/go-pkcs11uri v0.0.0-20201008174630-78d3cae3a980 // indirect
 	github.com/stretchr/testify v1.8.1 // indirect
+	go.uber.org/atomic v1.7.0 // indirect
+	go.uber.org/multierr v1.8.0 // indirect
 	golang.org/x/crypto v0.0.0-20220525230936-793ad666bf5e // indirect
 	golang.org/x/sys v0.8.0 // indirect
 	golang.org/x/text v0.9.0 // indirect

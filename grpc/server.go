@@ -25,7 +25,7 @@ import (
 	"github.com/google/go-tpm-tools/client"
 	pb "github.com/google/go-tpm-tools/proto/tpm"
 	tpmserver "github.com/google/go-tpm-tools/server"
-	"github.com/google/go-tpm/tpm2"
+	"github.com/google/go-tpm/legacy/tpm2"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"

@@ -2,8 +2,8 @@
   "key-providers": {
     "tpm": {
       "cmd": {
-        "path": "/path/to/tpm_oci_crypt",
-        "args": []
+        "path": "/tmp/tpm_oci_crypt",
+        "args": ["--tpm-path=127.0.0.1:2321"]
       }
     },
     "grpc-keyprovider": {

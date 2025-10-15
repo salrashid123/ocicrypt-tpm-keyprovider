@@ -44,172 +44,277 @@ In the end, the image itself is encrypted as shown below (in this case, just the
 
 ---
 
-### QuickStart
 
-#### Encrypt
+#### Build
 
-To encrypt an image, acquire the PEM format of the ekPub file from the certificate and the PCR value list you want to bind to.
-
-You can see an example of how to b64 encode the PEM file and the format to specify the PCRs.  Export them as `EKPUB` and `PCRLIST` variables.
-
-from there, encrypt an image (eg `app:server` on the local docker daemon) and copy the encrypted image to a registry (in the example below, its my dockerhub image)
+You can build the ocicrypt binary or grpc cserver directly from this repo or from the `Releases` section
 
 ```bash
-skopeo copy  --encrypt-layer=-1 \
-  --encryption-key="provider:tpm:tpm://ek?mode=encrypt&pub=$EKPUB&pcrs=$PCRLIST" \
-   docker-daemon:app:server docker://docker.io/salrashid123/ociencryptedapp:server
+cd plugin/
+go build  -o /tmp/tpm_oci_crypt .
 ```
 
-#### Decrypt
+### QuickStart
+
+First start `swtpm` and export the public PEM files
+
+```bash
+cd /tmp/
+rm -rf myvtpm && mkdir myvtpm  && swtpm_setup --tpmstate myvtpm --tpm2 --create-ek-cert &&    swtpm socket --tpmstate dir=myvtpm --tpm2 --server type=tcp,port=2321 --ctrl type=tcp,port=2322 --flags not-need-init,startup-clear --log level=2
+
+### in a new window
+export TPM2TOOLS_TCTI="swtpm:port=2321"
+
+### with EK
+tpm2_createek -c /tmp/ek.ctx -G rsa -u /tmp/ek.pub 
+tpm2_readpublic -c /tmp/ek.ctx -o /tmp/ek.pem -f PEM -n /tmp/ek.name
+
+### with H2
+# printf '\x00\x00' > unique.dat
+# tpm2_createprimary -C o -G ecc  -g sha256 \
+#    -c /tmp/primary.ctx -a "fixedtpm|fixedparent|sensitivedataorigin|userwithauth|noda|restricted|decrypt" -u unique.dat
+# tpm2_readpublic -c /tmp/primary.ctx -o /tmp/key.pem -f PEM -n /tmp/key.name
+```
+
+Then run a local registry
+
+```bash
+cd example/
+docker run  -p 5000:5000 -v `pwd`/certs:/certs \
+  -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/localhost.crt \
+  -e REGISTRY_HTTP_TLS_KEY=/certs/localhost.key  docker.io/registry:2
+```
+
+The following will demonstrate encryption/decryption `skopeo` and a local docker registry
+
+You will need [skopeo](https://github.com/containers/skopeo) for this sample
+
+The sample below uses [swtpm](https://github.com/stefanberger/swtpm) and  [tpm2_tools](https://github.com/tpm2-software/tpm2-tools)
+
 
 Decryption must be done on the same TPM where that ekPub exists.
 
 First copy the `tpm_oci_crypt` binary onto the image and create an `ocicrypt.json` file that point to that
 
 
+##### Configure ocicrypt plugin
+
+First set an env var instructing skopeo on where to find the binary 
+
+```bash
+cd example/
+export OCICRYPT_KEYPROVIDER_CONFIG=`pwd`/ocicrypt.json
+```
+
+`ocicrypt.json`:
+
 ```json
 {
   "key-providers": {
     "tpm": {
       "cmd": {
-        "path": "/root/ocicrypt-tpm-keyprovider/plugin/tpm_oci_crypt",
-        "args": ["--tpmPath=/dev/tpm0"]
+        "path": "/tmp/tpm_oci_crypt",
+        "args": ["--tpm-path=127.0.0.1:2321"]
       }
+    },
+    "grpc-keyprovider": {
+      "grpc": "localhost:50051"
     }
   }
 }
 ```
 
-from there, specify the env vars that point to that config file
+##### Encrypt
 
+To encrypt an image, acquire the PEM format of the ekPub file from the certificate and the PCR value list you want to bind to.
+
+First 
 ```bash
-export OCICRYPT_KEYPROVIDER_CONFIG=/path/to/ocicrypt.json
+cd example/
+export EKPUB=`openssl enc -base64 -A -in /tmp/ek.pem`
+echo $EKPUB
 
-skopeo copy --decryption-key="provider:tpm:tpm://ek?mode=decrypt" \
-    docker://docker.io/salrashid123/ociencryptedapp:server docker://localhost:5000/app:decrypted
+export PCRLIST=`echo "0:0000000000000000000000000000000000000000000000000000000000000000" | base64 -w 0`
+export USERPASS=""
+export OCICRYPT_KEYPROVIDER_CONFIG=`pwd`/ocicrypt.json
+export SSL_CERT_FILE=`pwd`/certs/tls-ca-chain.pem
+
+### now encrypt
+skopeo copy  --encrypt-layer=-1 \
+  --encryption-key="provider:tpm:tpm://ek?mode=encrypt&pub=$EKPUB&pcrs=$PCRLIST&userAuth=$USERAUTH" \
+   docker://docker.io/salrashid123/app docker://localhost:5000/ociencryptedapp:server
+
+### look at the file encrypted file
+skopeo inspect  docker://localhost:5000/ociencryptedapp:server
 ```
 
-(ofcourse the command above won't work for you since you dont' have the key i used for that dockerhub image..but you get the  idea)
+```json
+{
+    "Name": "localhost:5000/ociencryptedapp",
+    "Digest": "sha256:c7ec58f1cac9ba35544784174241e95224d05b8f804edd8b02812a794d14046b",
+    "RepoTags": [
+        "server"
+    ],
+    "Created": "2025-10-14T02:53:18.980326736-04:00",
+    "DockerVersion": "",
+    "Labels": null,
+    "Architecture": "amd64",
+    "Os": "linux",
+    "Layers": [
+        "sha256:dd5ad9c9c29f04b41a0155c720cf5ccab28ef6d353f1fe17a06c579c70054f0a",
+        "sha256:960043b8858c3c30f1d79dcc49adb2804fd35c2510729e67685b298b2ca746b7",
+        "sha256:b4ca4c215f483111b64ec6919f1659ff475d7080a649d6acd78a6ade562a4a63",
+        "sha256:eebb06941f3e57b2e40a0e9cbd798dacef9b04d89ebaa8896be5f17c976f8666",
+        "sha256:02cd68c0cbf64abe9738767877756b33f50fff5d88583fdc74b66beffa77694b",
+        "sha256:d3c894b5b2b0fa857549aeb6cbc38b038b5b2828736be37b6d9fff0b886f12fd",
+        "sha256:b40161cd83fc5d470d6abe50e87aa288481b6b89137012881d74187cfbf9f502",
+        "sha256:46ba3f23f1d3fb1440deeb279716e4377e79e61736ec2227270349b9618a0fdd",
+        "sha256:4fa131a1b726b2d6468d461e7d8867a2157d5671f712461d8abd126155fdf9ce",
+        "sha256:01f38fc88b34d9f2e43240819dd06c8b126eae8a90621c1f2bc5042fed2b010a",
+        "sha256:50891eb6c2e685b267299b99d8254e5b0f30bb7756ee2813f187a29a0a377247",
+        "sha256:c4cd914051cf67617ae54951117708987cc63ce15f1139dee59abf80c198b74e",
+        "sha256:ddc9bffd9ec055efa68358f5e2138ed78a2226694db2b8e1fb46c4ae84bae5ad",
+        "sha256:b44fb5a747b4d3095aa18743ae27b4c911a6fe69f08539796a3fc14b22316666"
+    ],
+    "LayersData": [
+        {
+            "MIMEType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "Digest": "sha256:dd5ad9c9c29f04b41a0155c720cf5ccab28ef6d353f1fe17a06c579c70054f0a",
+            "Size": 83932,
+            "Annotations": null
+        },
+        {
+            "MIMEType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "Digest": "sha256:960043b8858c3c30f1d79dcc49adb2804fd35c2510729e67685b298b2ca746b7",
+            "Size": 20322,
+            "Annotations": null
+        },
+        {
+            "MIMEType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "Digest": "sha256:b4ca4c215f483111b64ec6919f1659ff475d7080a649d6acd78a6ade562a4a63",
+            "Size": 599551,
+            "Annotations": null
+        },
+        {
+            "MIMEType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "Digest": "sha256:eebb06941f3e57b2e40a0e9cbd798dacef9b04d89ebaa8896be5f17c976f8666",
+            "Size": 284,
+            "Annotations": null
+        },
+        {
+            "MIMEType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "Digest": "sha256:02cd68c0cbf64abe9738767877756b33f50fff5d88583fdc74b66beffa77694b",
+            "Size": 188,
+            "Annotations": null
+        },
+        {
+            "MIMEType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "Digest": "sha256:d3c894b5b2b0fa857549aeb6cbc38b038b5b2828736be37b6d9fff0b886f12fd",
+            "Size": 112,
+            "Annotations": null
+        },
+        {
+            "MIMEType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "Digest": "sha256:b40161cd83fc5d470d6abe50e87aa288481b6b89137012881d74187cfbf9f502",
+            "Size": 382,
+            "Annotations": null
+        },
+        {
+            "MIMEType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "Digest": "sha256:46ba3f23f1d3fb1440deeb279716e4377e79e61736ec2227270349b9618a0fdd",
+            "Size": 345,
+            "Annotations": null
+        },
+        {
+            "MIMEType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "Digest": "sha256:4fa131a1b726b2d6468d461e7d8867a2157d5671f712461d8abd126155fdf9ce",
+            "Size": 122108,
+            "Annotations": null
+        },
+        {
+            "MIMEType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "Digest": "sha256:01f38fc88b34d9f2e43240819dd06c8b126eae8a90621c1f2bc5042fed2b010a",
+            "Size": 5209711,
+            "Annotations": null
+        },
+        {
+            "MIMEType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "Digest": "sha256:50891eb6c2e685b267299b99d8254e5b0f30bb7756ee2813f187a29a0a377247",
+            "Size": 1889065,
+            "Annotations": null
+        },
+        {
+            "MIMEType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "Digest": "sha256:c4cd914051cf67617ae54951117708987cc63ce15f1139dee59abf80c198b74e",
+            "Size": 921781,
+            "Annotations": null
+        },
+        {
+            "MIMEType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "Digest": "sha256:ddc9bffd9ec055efa68358f5e2138ed78a2226694db2b8e1fb46c4ae84bae5ad",
+            "Size": 4156535,
+            "Annotations": null
+        },
+        {
+            "MIMEType": "application/vnd.oci.image.layer.v1.tar+gzip+encrypted",
+            "Digest": "sha256:b44fb5a747b4d3095aa18743ae27b4c911a6fe69f08539796a3fc14b22316666",
+            "Size": 135,
+            "Annotations": {
+                "org.opencontainers.image.enc.keys.provider.tpm": "eyJrZXlfdXJsIjoidHBtOi8vZWs/bW9kZT1lbmNyeXB0XHUwMDI2cHViPUxTMHRMUzFDUlVkSlRpQlFWVUpNU1VNZ1MwVlpMUzB0TFMwS1RVbEpRa2xxUVU1Q1oydHhhR3RwUnpsM01FSkJVVVZHUVVGUFEwRlJPRUZOU1VsQ1EyZExRMEZSUlVGNVduSmhaMll3ZVNzMGVIVjFUSHA1V0ZoeU5ncDROVlZOVDA5SWQxVjVlbWNyU201NlMzVXpTRFphVTBZNE4wbFNabHBzYVdFelFXWkRaa1pFVFc5alNrMXVSV2xFVm1GMGJGSlpaRVJOWldoSGVHZHdDbWcxZWxKVVV6SnhZeTlxZVdGVVFXUlJkalUyZFhSdVduRkpka2hDWmtwb1YyaE1ZV0o1VkdjNE5UQm9WRWRsT0RCM09YQTVXRWMxYldFeU0ydFRiaXNLY1ZoSFVsSlNiM1J6ZEdGSWExUXJURnBCYm10bVdsQTBOMnhIVmtaUFdIbHZiVEVyUkVKV2VrczRaVk5KUlRoM2FHcFlUbTR4VFZWdU16RTRiVEZ6VkFwMk5rSXhkbVZOZUZSNVRHeDBkMFYzVUdKcGEzQTVWRXhzUVU5bmFHNTJObkYwVlRab1ZIVktRazFVU1VZek5FZDVUVWMyTUhFNU5GTktValZHZFU1M0NqSlBNR1pWYW1aUlRHeG5lVGt4WTI5TFkwdGlaMjRyT0U4eE5sbE1iRXRFZVZoRmNHVTBaalJDYlV4dFQyMTNVWFpPYTFKeFduRkJTRUp5VFdsNmJXa0tUbmRKUkVGUlFVSUtMUzB0TFMxRlRrUWdVRlZDVEVsRElFdEZXUzB0TFMwdENnPT1cdTAwMjZwY3JzPU1Eb3dNREF3TURBd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdDZz09XHUwMDI2dXNlckF1dGg9Iiwic2Vzc2lvbl9rZXkiOiJleUpqYVhCb1pYSjBaWGgwSWpvaWNHOW5aVUY0TkRKT1JIVk5TRzlvYW1WMVZESmhVVFJtWkRnd2VVVkZhMUJQYzNncmFFMHZRbkZ2V0hFNVlXbFRWRWxsZUZNeGRqVk1WVE0zV0dWNlR5SXNJbWwySWpvaWRYUlNZMlV4ZDI1TlYzaDFiVkowTWlJc0ltdGxlVWx1Wm04aU9uc2liV1ZqYUdGdWFYTnRJam9pTVNJc0luZHlZWEJ3WldSTFpYa2lPaUpsZVVveVdsaEtlbUZYT1hWSmFtOTVURU5LTUdWWVFteEphbTlwVWtaV1VWUkZiRVJSVmxKR1NXbDNhV05IVG5samVVazJWek56YVdSdFJuTmtWMVZwVDJsS1FsRlZSa0pSVlVaQ1VWVkdRbEZWUmtKUlZVWkNVVlZHUWxGVlJrSlJWVVpDVVZWR1FsRlZSa0pSVlVaQ1VWVkdRbEZWUmtKUlZVWkNVRk5LT1ZoVGQybGFTRlozWWtkc2FsbFlVbXhhUlRsM1NXcHdOMGx0ZEd4bFYxcHdZa2RWYVU5cFNYUk1VekIwVEZWS1JsSXdiRTlKUmxKVVZYcEpaMVZHU2twV2EwWlZVbE5DVEZKV2EzUk1VekIwVEZaNGRWUlZiRXBSTTBKQ1YxVmtZVTVGVmtkUk1tUkdVbGM1UWxSVlNrSmFhWFJ2V2pKT1NtUXlaR2xQU0dSUFkxVkdSbEZYWkVwUmJWa3lVbGhXUTFFelpFSlRWV1JoWWpKV2VFMTZVbHBqYWtWNldXdHJkbEZzZUhWaFZGRXlXbTF3Y0ZGVmJITmxSazVIV1c1V1NtVnVUVEZSV0VaWVZXcENUMWRJYkhKaVJVWkNVVlZHUWxWVlJrMVJXR1JHVVZWR1JWRllhSFpSVmtaRVVWZGtTRk5YT1ZSaE1GWkxaREJHUWxGVlRrcFJWbmgxVVhwS2IyTnJOVE5QUldjeVYyMVNjbUp0WkV0Vk1rWlhWbXBLTmxWdWJGSldWbWd4VjIweFEyTnViRE5UTWpWdlRWZFZOVlZYUmt0V1NFNUNVa1ZLVkdJd1JsSlJNRVp1VW01b2RsWlhPVVpWTUVaQ1VWWjRkVkZWUmtwUlZXeENZWHBuTWsxRlZscFRSbFpzVVZkc1NGUkdhSE5TTUhCMlRqSXhkbGRIT1ZKT1JHeElUVEl4TmxOVVJraFBSbG94VlhsMGVWUjVPVE5SVlU1RFVtMTBORXN3UmxWWFJUbEhZVVpPZGxWV2VIVmpXRkpzVFRCS2NrOVZiRmROUlhSUVlVWkdVV1JXVm5oT01VNHlWVlZTTVU1VlJtbGhla0pvVXpCT1FsVldiRVphTW1SR1VUQkdVbEZ0YUZwWGJVWXlVa2hLYlZOclJsUlRlbEoxVGpCR2FHRnJSakZqYkhoMVkxVnNRMDVFUVRGTU0xWlhVbXhyZDA5WGVETmxWMnQ2VWtaWk5GcEViRTFrVm1oT1QxZGtlVlJYVmtaWFJUbFJVVlpvV1ZORVZrVlpiV2hOVGxaT1dHRXlUakJTYkVadVVrZFNVRmR0ZUd0bGJrcEVUa1o0ZFdOclJrbFhibVJSVm1wc1RtSXlVblpXVlRnMFUxaHNObFpWT0ROUlZYaFlVbFZOTW1NeFVUTk9SV2hKVlhwU2NXRnJiekJhYm1NMVVWWkdjMkpWT1ZwbGJYUm9UMWMxTmxWVGREQlNla0p5WWpOU2VVMHhlSFZTVldjeVdtdGFTRTFXY0c5U01tZDNWMjFLYVdSSGJFSlVSVko0Wkd0U05tTlhOWHBsU0VwRlkwWkplV013VW5kbFdHc3dZVE5HYmsxRldsSlZSekIyVDBVeFVtSnRPSFpOZVhNeVRWaG9kVTlFU2tsUk1YaDFaVWhHV2xvd2FGWmFiVEZ2V21zeFEyVkZXa3RXVnpVeVkyczVhRTVJY0ZsVmJHeHZZakF4TUdOVk1VZFdlbEpHVFVoQ1lXVkZiRzFpUnpWWVRUTkNXazVJVm1oTmFrcDBZVlphUWxOc1RuZFZSbXhyVkZaNGRVOUZhR3RsYm14NVRURmtkRkV3Y0VKa2FUaDVWa1JWZDFSVlRsUmhXRzkyVGpBd05GcHJOWEppVm14UVVsVmtNMDlGU2toa2JscEVXak53TTFadGJHbFZhM2hOVWtkNFNGcDZUa3BVZVRoNlRucHNjbFpzZUhWUlYyUlRVVlZHUWxKclJrTlNhMFpDVmtka1FsTlZSa0pqTUVaQ1VWVkdRbEZWVGtOYWVUZ3daRWRhVms0eFkzZE5hbVJ6VG10Sk5XTkZaRTlQU0dod1kydDRjVk13YkdGU1IzaHRUak53ZWxwdE1VMU9SbmgxVFZSc1NrNXVXak5SVmtaQ1VUQk9jMk13YUc5TmFsSnlUbFZPV1dKRmRGcGFiRnBVWld4QmVGcEZVbTVWUlhNMVZUSnNkMVl4VmxKVVNHeHNVak53ZFZkRmVIVlRNMEpTVlc1V1FsSXpaRUpUVlUxNlRqRjRkV0l4UWt4a2EzUXpXV3RuTTFKRlNsQk9NVkp6V2taYVdWTllhRlJhTVdSVVdUSnNVMU5WVm5oVWVtaExVbGR2TTJGWGFFTmFiVVo0VlRJeFZtVnRhRXhSYlVrMFpWTTVhMkV3Y3pGVGExSlJVakJzVFZveGVIVmhSVlUxWWxkb2RWZEhOVFpqVlZVellsZFZORXd4YkVkVmFrWkhURE5hUlZRd1dYSmliRXBOVmpKV1MxTlVWbkZQUmxwV1ZrWlJlRXd5TldsU01ERjVUbWwwY1ZKRVFsbGFWRkY2VTFaV05GZHVhSFpXYkhoMVVXMDRja3N3ZHpOV1IxWjRaVlZyT1ZoSE5IUk1VekIwVEZWV1QxSkRRbFZWTVUxNVNVWkNVMU5XV2tKV1JWVm5VekJXV2t4VE1IUk1VekZqWW1sSmMwbHVRbWhqYlZaMVpFVTFhR0pYVldsUGFVbDNUVVJDYVU1cVp6SlphazB6VFVkWmQwNHlWVFZQVkdNeVRrUnNiRTFFU1RGTmFsazFUbFJWTTA1dFRtdE5WMDAxVFVSVmVFNHlTVFZQVkdzMFRWZEdiVTF0VFhkWlZHeHNUVmRSTVZwWFdURk5SRmswVDFSU2JGbDVTWE5KYlZaeVkwaFdhVWxxYjJsVVZ6RlNaVlp3UlZOdGRFNWlWa1kxVjJ0U1VtVlZOVVZXVkVKUFpXeEZNVlJyWkZabFZURkZWbGhrVDFaR1ZYZFVWM0JUWVdzMVJXRjZRazVsYTJ3elZHdGtTazFGTlZWV1ZGWk9ZbFpHTlZkclVrdGhNREYwVlZoc1lWSkZTbTlVYTJSU1RVVTVWVlZVVms5U1JXdDNWREZTWVdGRk5VVlNWRUpoVmtaR05WUnRjR3BOYkd4eFdUTm9UMkZ0WTNsWFYzQmFUbFUxUlZremNGQldSMDE2VkZod1FrMUZNWEZWV0doUFZrVlZkMVJzVWxKTmF6VkZVbFJDVGxaR1NuUlVhMUpPVFVVeFZWWllhRTVsYldOM1ZGWlNVMkV3TlVWaGVrSlFWa1pHTlZSclVrNU5helUyVlcxc1QxSkZNSGRVVmxKV1pVVTFSVlpVUWs1V1IwMHhWR3hrUmswd01YRlhXR2hQWVcxTmVWUnRjRTVrTURVMllUTnNXbUZyTUhkVWJuQnVUVEExVlZsNlJrOVNNREI2VjFaU2FrNVZOVlZhZWtaUVVrZE9OVlJZY0Zwa01XeFZXWHBTVG1Wc1ZYaFViRkpUWVRBMVNGZFVRbUZoYkVVd1ZHNXdhazFWTlZWWmVsWlBUV3RWZVZSdWNFdGhWVFZJVWxSS1lWWkhVbTlVYTJSS1RUQTFWVlJZY0U5U1IyUTJWRzF3VjJGRk5WVlVWRUpQWVdzd01GUlljR3BOUlRsVlZsaHNUMkZzYTNoWFZsSmhZV3MxY1dGNlNrNVdSVEUyVkd0U1JrMXJOWEZWV0hCUFlXeHJkMVJ0Y0ZKTlJUVklWVlJLWVdGc2JEWlVhMlJHVFVad1JWZHRlRTlTUmxWNVZERlNVazFGTlZWWFZFcE9Wa2ROZDFSdE1VNU5WVEZ4VmxSV1QyRnNSWGRVYTFKVFlUQTFjVlpVU2xCU1JrVjZWRzV3Ymsxck5UWlpNMlJPVWpCVmVWUXdVazVOVlRSNVVsUkdUbUZzVlhkVWJGSk9aV3N4Y1ZremFFOWhhekUxVjIxd1lXRkZOVFpoZWtwT1ZrWlZkMVJyVWtaTmF6VkZWbGhvVDJWc2JEWlViRkpPVFdzMU5sWlVUazlTUm5CelZHeGtSazB3TVZWVlZGWlBaV3hyZDFRd1VsSmxWVFZ4VjFSQ1dsWkdhekJVYkZKcVRXczVSVlZ0Y0U5aGExVjVWRmR3YWs1Vk5WVlZWRXBQWldzd01GUlljRlpsYXpGRlYxUlNUMVpHUlhkVWJuQmFUVlV4TmxvemNFNVNSMDE2VkZod2NrMHdNVVZVVkZaUFZrZGpkMVJ1Y0U1TlZUVjBWVlJLVGxaRk1UVlVXSEJPVFd4c2NWWlljRTlpVmxZMVYxZHdRMkZGTlRaU1ZFWlFVa1pGZWxSc1VrcE5WVEZ4Vmxoc1QySldhM3BVYTFKcVpXczFObFZVU2s1V1JrVXdWRzB4U2sxVk5VVlRiV3hQVWpBd2VGZFdVbEpsUlRWMFZsUktXbUZzYTNsVWJHUkdUVlV4UlZSVVFrNWxiVTE1VjFod1VrMHdOVlZYVkVKUFlXeEtkRlJzVW01Tk1EbFZWMjB4VDJKV1JqWlVWbEpMWVZVMVJWVlVRazVoYkZWNVZHcEtSazFHYkhGVVZGSlBZV3hWZUZSWWNGSk9WVFZGVmxod1VGSkhUWHBVYlhCdVRXeHNWVlpVVWs5U01WVjVWMnhTVG1WRk5VaFZWRVpQVmtad2MxUlljRTVsYXpGVlZGUlNUMkpXUmpaVVZsSnFaV3MxVlZWWVpGcFdSMDE1VkZod1drMUZNWEZVV0doUFpXeHJlVlJzVWxOaE1EVTJXbnBHVDFKSFRURlVhMlJPVFd4c05sbDZRazlsYlUxM1ZHeFNhazB3TlZWUlZFcE9ZV3hyTVZSdE1VcE5NREZGVkZSV1QxWkdSWGRYV0hCaFlXczFSVkpVUW1GaGJHdDZWRzF3Ymsxc2NGVlpla3BPWld4cmVsUldVbXBOUlRWVlZsaHdUMkZzYXpCVWJGSlNUVEExVlZWdGFFOVNSV3QzVjJ0U1ZrMUZOVVZoZWtKUFlXc3hObFJZY0ZKTlJUVTJXWHBXVDFJeFJYZFVibkJPVFdzeE5sRlVUazVXUlRBeFZGaHdVazFWTVRaVmJXaFBWa1ZzTmxSc1VsSk5helUyVmxSQ1lWWkhUWHBVVldSR1pXc3hjVlZ0TVU1bGEwVjVWRzF3VmsxVk5YUlNWRXBQWVd4V05GUnJaRTVOYkd3MlYxUk9UMlZ0ZERaVU1WSk9aVVUxY1ZSVVNtRmhiRXB3Vkcxd1RrMUdiSEZYV0d4UFlXMU5lVmRzVWt0aFZURTJXbnBDWVdGck1UUlVXSEJhVFZVNVZWVnRjRTlpVlRCM1YxZHdVazFGTlRaaGVrWlFVa1pGZUZSdWNFSk5helZWVkZSQ1QyRnNiRFpVYTFKU1pWVTFkRlZVUWxwbGJIQnlWR3RrV2sxc2NFVlplazVQVmtWVmVsUnRjRk5pUlRWMFUxUkdUbUZ0VGpSVWJHUkdUVEF4VlZWWWFFOVNSMk4zVkZkd2FtVlZOVWhWVkVwUVZrZFNiMVJ0TVZKTmF6bFZVVzFvVDFJeFZYcFVibkJTVGxVMVJWVlVRazVXUmxZMFZHdFNSazFGTVhGUmJXaE9ZbFpHTlZkclVrdGhNREYwVlZoc1lWSkdSWGhVYTJSV1RVVTFSVk5ZWkU5V1JVVjRWR3hTVW1WVk5VaFVWRUpRVmtaR05sUlhjRUpOUm14eFZWUkdUMVpIZERWWGExSkxZVEF4ZEZWWWJHRlNSWEJ5VkZWa1JsQlRTamxtVVQwOUluMTkiLCJ3cmFwcGVkX2tleSI6ImNQSlJvU0drcnVxZlFBVUtVUmRCZjAwd2NLSENiSFhOaGM1SENIVm1jTFRvVnUvUkRwbHh1Z295Smc5aDN4Nk5TV0NaOUc3b2J1K3lSa0tNZHhvandjUStzLzlyY1NGOFZSZk1CZDl4SkducFJSVEs0TWdmbzQzNEdYQVF1bGtTWWJieU5BaHA0U05PQ28yOVlsd3FDb0ROemQwaE1URzhWTmJJZGtRRXlDWXVlYVZmZXI3akxZbkZweFl3WStoRXZabjBFTStpaE5hTE8xMklDTXgxeklOalJJWXRUWStoYmZjVTVkbFJOK29CRXNIMFJISi9BOHZyTnpuR1p0dDk1Nml6RGhkbmxqV2hFVlVqZVU5bXE2d1BDQStUY2pPMU9pUGRuZEk9Iiwid3JhcF90eXBlIjoiQUVTIn0=",
+                "org.opencontainers.image.enc.pubopts": "eyJjaXBoZXIiOiJBRVNfMjU2X0NUUl9ITUFDX1NIQTI1NiIsImhtYWMiOiIrL2FneTI3U1EvMHhvZ1BXQ3lTRE82Q2NMWUw3YXovMWhGVjBvU0NYaUdzPSIsImNpcGhlcm9wdGlvbnMiOnt9fQ=="
+            }
+        }
+    ],
+    "Env": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"
+    ]
+}
+```
 
-Just a note on using OCICrypt:  the image that is decrypted ...is decrypted so anyone who runs the command above can 'just copy' the image somewhere else, unarmored.  
+if you decode the key:
 
-Also note the PCR value binding:  if the pcr values change on the VM an _already_ downloaded/decrypted container will continue to run (since its already unarmored, etc)
+```json
+{
+  "key_url": "tpm://ek?mode=encrypt&pub=LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUF5WnJhZ2YweSs0eHV1THp5WFhyNgp4NVVNT09Id1V5emcrSm56S3UzSDZaU0Y4N0lSZlpsaWEzQWZDZkZETW9jSk1uRWlEVmF0bFJZZERNZWhHeGdwCmg1elJUUzJxYy9qeWFUQWRRdjU2dXRuWnFJdkhCZkpoV2hMYWJ5VGc4NTBoVEdlODB3OXA5WEc1bWEyM2tTbisKcVhHUlJSb3RzdGFIa1QrTFpBbmtmWlA0N2xHVkZPWHlvbTErREJWeks4ZVNJRTh3aGpYTm4xTVVuMzE4bTFzVAp2NkIxdmVNeFR5TGx0d0V3UGJpa3A5VExsQU9naG52NnF0VTZoVHVKQk1USUYzNEd5TUc2MHE5NFNKUjVGdU53CjJPMGZVamZRTGxneTkxY29LY0tiZ24rOE8xNllMbEtEeVhFcGU0ZjRCbUxtT213UXZOa1JxWnFBSEJyTWl6bWkKTndJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==&pcrs=MDowMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwCg==&userAuth=",
+  "session_key": "eyJjaXBoZXJ0ZXh0IjoicG9nZUF4NDJORHVNSG9oamV1VDJhUTRmZDgweUVFa1BPc3graE0vQnFvWHE5YWlTVElleFMxdjVMVTM3WGV6TyIsIml2IjoidXRSY2Uxd25NV3h1bVJ0MiIsImtleUluZm8iOnsibWVjaGFuaXNtIjoiMSIsIndyYXBwZWRLZXkiOiJleUoyWlhKemFXOXVJam95TENKMGVYQmxJam9pUkZWUVRFbERRVlJGSWl3aWNHTnljeUk2VzNzaWRtRnNkV1VpT2lKQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUFNKOVhTd2laSFZ3YkdsallYUmxaRTl3SWpwN0ltdGxlV1pwYkdVaU9pSXRMUzB0TFVKRlIwbE9JRlJUVXpJZ1VGSkpWa0ZVUlNCTFJWa3RMUzB0TFZ4dVRVbEpRM0JCV1VkYU5FVkdRMmRGUlc5QlRVSkJaaXRvWjJOSmQyZGlPSGRPY1VGRlFXZEpRbVkyUlhWQ1EzZEJTVWRhYjJWeE16UlpjakV6WWtrdlFseHVhVFEyWm1wcFFVbHNlRk5HWW5WSmVuTTFRWEZYVWpCT1dIbHJiRUZCUVVGQlVVRk1RWGRGUVVGRVFYaHZRVkZEUVdkSFNXOVRhMFZLZDBGQlFVTkpRVnh1UXpKb2NrNTNPRWcyV21ScmJtZEtVMkZXVmpKNlVubFJWVmgxV20xQ2NubDNTMjVvTVdVNVVXRktWSE5CUkVKVGIwRlJRMEZuUm5odlZXOUZVMEZCUVZ4dVFVRkpRVWxCYXpnMk1FVlpTRlZsUVdsSFRGaHNSMHB2TjIxdldHOVJORGxITTIxNlNURkhPRloxVXl0eVR5OTNRVU5DUm10NEswRlVXRTlHYUZOdlVWeHVjWFJsTTBKck9VbFdNRXRQYUZGUWRWVnhOMU4yVVVSMU5VRmlhekJoUzBOQlVWbEZaMmRGUTBGUlFtaFpXbUYyUkhKbVNrRlRTelJ1TjBGaGFrRjFjbHh1Y1VsQ05EQTFMM1ZXUmxrd09XeDNlV2t6UkZZNFpEbE1kVmhOT1dkeVRXVkZXRTlRUVZoWVNEVkVZbWhNTlZOWGEyTjBSbEZuUkdSUFdteGtlbkpETkZ4dWNrRklXbmRRVmpsTmIyUnZWVTg0U1hsNlZVODNRVXhYUlVNMmMxUTNORWhJVXpScWFrbzBabmM1UVZGc2JVOVplbXRoT1c1NlVTdDBSekJyYjNSeU0xeHVSVWcyWmtaSE1WcG9SMmd3V21KaWRHbEJURVJ4ZGtSNmNXNXplSEpFY0ZJeWMwUndlWGswYTNGbk1FWlJVRzB2T0UxUmJtOHZNeXMyTVhodU9ESklRMXh1ZUhGWlowaFZabTFvWmsxQ2VFWktWVzUyY2s5aE5IcFlVbGxvYjAxMGNVMUdWelJGTUhCYWVFbG1iRzVYTTNCWk5IVmhNakp0YVZaQlNsTndVRmxrVFZ4dU9FaGtlbmx5TTFkdFEwcEJkaTh5VkRVd1RVTlRhWG92TjAwNFprNXJiVmxQUlVkM09FSkhkblpEWjNwM1ZtbGlVa3hNUkd4SFp6TkpUeTh6TnpsclZseHVRV2RTUVVGQlJrRkNSa0ZCVkdkQlNVRkJjMEZCUVVGQlFVTkNaeTgwZEdaVk4xY3dNamRzTmtJNWNFZE9PSGhwY2t4cVMwbGFSR3htTjNwelptMU1ORnh1TVRsSk5uWjNRVkZCUTBOc2MwaG9NalJyTlVOWWJFdFpabFpUZWxBeFpFUm5VRXM1VTJsd1YxVlJUSGxsUjNwdVdFeHVTM0JSVW5WQlIzZEJTVU16TjF4dWIxQkxka3QzWWtnM1JFSlBOMVJzWkZaWVNYaFRaMWRUWTJsU1NVVnhUemhLUldvM2FXaENabUZ4VTIxVmVtaExRbUk0ZVM5a2EwczFTa1JRUjBsTVoxeHVhRVU1YldodVdHNTZjVVUzYldVNEwxbEdVakZHTDNaRVQwWXJibEpNVjJWS1NUVnFPRlpWVkZReEwyNWlSMDF5Tml0cVJEQllaVFF6U1ZWNFduaHZWbHh1UW04ckswdzNWR1Z4ZVVrOVhHNHRMUzB0TFVWT1JDQlVVMU15SUZCU1NWWkJWRVVnUzBWWkxTMHRMUzFjYmlJc0luQmhjbVZ1ZEU1aGJXVWlPaUl3TURCaU5qZzJZak0zTUdZd04yVTVPVGMyTkRsbE1ESTFNalk1TlRVM05tTmtNV001TURVeE4ySTVPVGs0TVdGbU1tTXdZVGxsTVdRMVpXWTFNRFk0T1RSbFl5SXNJbVZyY0hWaUlqb2lUVzFSZVZwRVNtdE5iVkY1V2tSUmVVNUVWVEJPZWxFMVRrZFZlVTFFVlhkT1ZGVXdUV3BTYWs1RWF6Qk5la2wzVGtkSk1FNVVWVFZOYlZGNVdrUkthMDF0VVhsYVJFSm9Ua2RSTUU5VVVUVk9SRWt3VDFSYWFFNUVSVEJhVkZGNVRtcGpNbGxxWTNoT2FtY3lXV3BaTlU1RVkzcFBWR016VFhwQk1FMXFVWGhPVkVVd1RsUlJNazVFUlRCTlZGSnRUa1JOTUUxVVZYaE5lbWN3VFZSU2EwNUVhekJQVkZGNVRrUk5NazU2VW1sT1JFMHdUVlJWZUU1RVZUQk5WR00xVGxkRk0wMXFXWGhPYW1NeVRtcE5kMDU2YTNsWmFrMHdUbnBuTTA1VVl6Rk9SMDB6V1ZSak5VNVVaekZQUkdONVRYcFpkMWxVWXpSTmVsVXhUbFJTYTA1SFdUQmFhbEUwVG5wak1VNVVZelZPTWtVeVRucEthVTVIUlRKYVZHUm9Ua2RKTTA1VVRYcE9SR2Q2VG1wV2FFNVVUVEJPYWswMFRYcGpNRTlVVlhsT2Fsa3hXVlJhYWs1cWF6Sk5WRTE2VGtSRk1rNXFVWHBPYWxrd1RtcFJNRTVIVVRKYWFsbDZUa2RGTUZwRVdteE9SRlV5VDFSUk1FNVVXVEpOVkdNd1RtMU5NVTFxVlRWT2FsRXdUa1JTYTA1cVZUSlBSRkV6VG5wbk1rNTZZM2ROUjBVeVQwUk5NVTR5UlRGTmFsVXdUbFJOZWsxcVkzaE9hazE1V21wYWFFNTZhekpOVkZVd1RrUkZNazVFVlhoT2VsbDZUbFJOTWs1NlZUTk9SRnBzVGxkRk0wMVVVVFZPZWxrd1QwUlJlVTVxV1RCWlZGazBUbFJqTWs5RVVtcE9ha1V5VFdwak5VNVVVVEpPZWswMFRYcFZlazFFV1RST1ZGRXdUbnBaTVUxNlozcE5SR016VFhwck0wMUVUVFZPVkdjd1RucE5NVTV0VVRKTlZFMTVUWHBOTWxscVZYcE9iVlY1V1dwQ2FFNTZSVEZQUkZFelRsUkpNVTFxVlhsT2JWa3pUa1JqZWs1NlVUSk5WRkUwVG0xSk1VNUVTbWxPUjAweFdWUlJlRTV0VlRKWmFsa3lUbGRGTVUxRVRUQk5lbU15V1hwUk0wNVVXVEJPYWxKdFRsUm5NMDlVV20xT2JWRjZUVlJLYVU1RVVUQk5hbFV5VGpKRk1GbHFUVFJPYWxVeFRYcFJOVTVFVlhwUFJHTXpUbXBuTWxsVVZUUk9SMVV5V2xSTmVFNUhVVEZPVkZwc1RYcE5lazFVVFRST2JWRjZUVlJqZWs1VVVYZFpWR015VFhwWk1FMXFUWGhPZWxreVRsUlNhMDU2WnpGT1JHTTFUa2ROTWxsNll6Qk9lbU13VGxSak0wNVVRVEpOYWxrMVRtMUpNMDFFVFRWT1ZGRXdXWHBhYWs1RVJUQmFhbGt6VG1wbk1scFVZekpOZWxrelRWUmpNRTVVVlhwT2FsazBUbFJSTTA1VVVtaE9SRWt3V2tSVk1FNUVhekJPYWsxNlRYcFJNRTU2WXpWT1IxRXdUbnBOTWsxNlFUTk5WRTAxVFhwUk1VMTZVbWhPVkVsNlRsUlJNazU2VlRCYVZHTXpUVWRGZWsxcVVtMU5la0V5VG1wVk1VNXRSVEpPYWxWNFRrZE5NbGw2V1ROT2VtdDZUMVJOZUU1cVRUSmFhbEpwVG1wTk1GbHFXWGxPYW1NeVdsUkthVTE2WnpCYWFrMTRUWHBaTVU5VVVtcE9iVTB3V1dwUk1FNTZhekZQUkZFeFRucEJNazVVVFRCT2FsbDZUa1JSZVU1dFVUQlplbHByVGtkWk1scEVZek5PVkVVelRtcFNiRTV0U1RGTmFtTjRUbGRGTTAxVVVYaE9SR2N3VFdwamVVNUhVVEpQVkdSb1RtMVJNazlVUW1oT1IxVXpUbnBSTlU1RVVUQk5WRlY0VGtSRk1FMXFRbWhOYlZGNVdrUkthMDF0VVhsYVJGRXhUa2RWTUU1RVNYZE9WRUV4VGxSUmVVNUhUVEJQVkZGNlRXcEJNRmxxVVRGT1ZHdDVXa1JLYTAxdFVYbGFSRXByVFVkRlBTSjlmUT09In19",
+  "wrapped_key": "cPJRoSGkruqfQAUKURdBf00wcKHCbHXNhc5HCHVmcLToVu/RDplxugoyJg9h3x6NSWCZ9G7obu+yRkKMdxojwcQ+s/9rcSF8VRfMBd9xJGnpRRTK4Mgfo434GXAQulkSYbbyNAhp4SNOCo29YlwqCoDNzd0hMTG8VNbIdkQEyCYueaVfer7jLYnFpxYwY+hEvZn0EM+ihNaLO12ICMx1zINjRIYtTY+hbfcU5dlRN+oBEsH0RHJ/A8vrNznGZtt956izDhdnljWhEVUjeU9mq6wPCA+TcjO1OiPdndI=",
+  "wrap_type": "AES"
+}
+```
+
+Note the last layer is encrypted; you can encrypt all the layers if you want
+
+##### Decrypt
+
+To decrypt, just specify the mode
+
+```bash
+skopeo copy  --decryption-key="provider:tpm:tpm://ek?mode=decrypt&pub=$EKPUB&pcrs=$PCRLIST&userAuth=$USERAUTH" \
+    docker://localhost:5000/ociencryptedapp:server docker://localhost:5000/app:decrypted
+
+skopeo inspect  docker://localhost:5000/app:decrypted
+```
+
+If you wanted to use an H2 image
+```bash
+export H2PUB=`openssl enc -base64 -A -in /tmp/key.pem`
+echo $H2PUB
+
+skopeo copy  --encrypt-layer=-1 \
+  --encryption-key="provider:tpm:tpm://ek?mode=encrypt&pub=$H2PUB&pcrs=$PCRLIST&userAuth=$USERAUTH&parentKeyType=H2" \
+   docker://docker.io/library/busybox docker://localhost:5000/ociencryptedapp:server
+
+skopeo copy  --decryption-key="provider:tpm:tpm://ek?mode=decrypt&pub=$H2PUB&pcrs=$PCRLIST&userAuth=$USERAUTH&parentKeyType=H2" \
+    docker://localhost:5000/ociencryptedapp:server docker://localhost:5000/app:decrypted
+```
+
+Note on using OCICrypt:  the image that is decrypted ...is decrypted so anyone who runs the command above can 'just copy' the image somewhere else, unarmored.  
 
 ---
 
-### Setup
 
-Before we jump in on using it live, lets demonstrate it running on a VM that has a TPM
-
-#### Create VM
-
-We're using a GCE image here:
-
-```bash
-gcloud compute instances create attestor  \
-    --zone=us-central1-a --machine-type=e2-medium --no-service-account --no-scopes \
-    --image-family=debian-10    --image-project=debian-cloud    --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring
-```
-
-SSH to the VM and install the following
-
-* [docker](https://docs.docker.com/engine/install/debian/)
-* [skopeo 1.12.1](https://github.com/containers/skopeo/blob/main/install.md)
-* optionally [cranev 0.14.0](https://github.com/google/go-containerregistry/blob/main/cmd/crane/README.md), docker
-* `golang 1.19+`
-* [tpm2_tools](https://tpm2-tools.readthedocs.io/en/latest/INSTALL/)
-
-  See alternate install instruction [here](https://github.com/salrashid123/tpm2#installing-tpm2_tools-golang)
-  We'll need tpm2_tools to read the pcr values and/or extract the EKPub
-
-
-#### Run local registry
-
-Cone the repo and run docker registry locally to test:
-
-```bash
-sudo su -
-cd /root/
-git clone https://github.com/salrashid123/ocicrypt-tpm-keyprovider
-# all paths in this example is relative to the root
-cd ocicrypt-tpm-keyprovider
-
-
-cd example
-docker run  -p 5000:5000 -v `pwd`/certs:/certs \
-  -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/localhost.crt \
-  -e REGISTRY_HTTP_TLS_KEY=/certs/localhost.key  docker.io/registry:2
-```
-
-
-#### Get EKPub Key and PCR values
-
-In a new window, use `gcloud` to get the TPMs ekPub via the [get-shielded-identity](https://cloud.google.com/sdk/gcloud/reference/compute/instances/get-shielded-identity) API. 
-
-If you're on your laptop, run the following and scp the `ekpub.pem` file to the tpm
-
-```bash
-gcloud compute instances get-shielded-identity attestor  \
-  --zone=us-central1-a --format="value(encryptionKey.ekPub)" | awk '/^$/{n=n RS}; /./{printf "%s",n; n=""; print}' -  > /tmp/ekpub.pem
-
-## for me the key was:
-$ cat /tmp/ekpub.pem 
------BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyLLB37zQTi3KfKridPpY
-tj9yKm0ci/QUGqrzBsVVqxqOsQUxocsaKMZPIO7VxJlJd8KHWMoGY6f1VOdNUFCN
-ufg5WMqA/t6rXvjF4NtPTvR05dCV4JegBBDnOjF9NgmV67+NgAm3afq/Z1qvJ336
-WUop2prbTWpseNtdlp2+4TOBSsNZgsum3CFr40qIsa2rb9xFDrqoMTVkgKGpJk+z
-ta+pcxGXYFJfU9sb7F7cs3e+TzjucGFcpVEiFzVq6Mga8cmh32sufM/PuifVYSLi
-BYV4s4c53gVq7v0Oda9LqaxT2A9EmKopcWUU8CEgbsBxhmVAhsnKwLDmJYKULkAk
-uwIDAQAB
------END PUBLIC KEY-----
-```
-
-If you have `tpm2_tools` installed on the remote vm, ssh in  and get its ekpub locally (we're doing this just to show you the keys are the same)
-
-```bash
-tpm2_createek -c ek.ctx -G rsa -u ek.pub -Q
-tpm2_readpublic -c ek.ctx -o /tmp/ekpub.pem -f PEM -Q
-cat /tmp/ekpub.pem
-
------BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyLLB37zQTi3KfKridPpY
-tj9yKm0ci/QUGqrzBsVVqxqOsQUxocsaKMZPIO7VxJlJd8KHWMoGY6f1VOdNUFCN
-ufg5WMqA/t6rXvjF4NtPTvR05dCV4JegBBDnOjF9NgmV67+NgAm3afq/Z1qvJ336
-WUop2prbTWpseNtdlp2+4TOBSsNZgsum3CFr40qIsa2rb9xFDrqoMTVkgKGpJk+z
-ta+pcxGXYFJfU9sb7F7cs3e+TzjucGFcpVEiFzVq6Mga8cmh32sufM/PuifVYSLi
-BYV4s4c53gVq7v0Oda9LqaxT2A9EmKopcWUU8CEgbsBxhmVAhsnKwLDmJYKULkAk
-uwIDAQAB
------END PUBLIC KEY-----
-```
-
-If a TPM has an Endorsement Key **Certificate**, you could cryptographically verify that and extract the public key.  
-See [Extract ekcert from tpm and seal data against it](https://github.com/salrashid123/tpm2/tree/master/ek_cert_seal)
-
-You can also list out the PCR values (you could also use golang as shown in [PCR Read and Extend](https://github.com/salrashid123/tpm2/blob/master/pcr_utils/README.md)):
-
-```bash
-tpm2_pcrread sha256:0
-  sha256:
-    0 : 0xD0C70A9310CD0B55767084333022CE53F42BEFBB69C059EE6C0A32766F160783
-```
-
-We're getting the PCR values here so that we can bind the decryption of the image to this PCR value(s)
-
-Anyway, encode the key as base64 since we'll use this as the 'thing' to encrypt to (ofcourse your ekpub will certainly be different)
-
-```bash
-
-## base64 encode the following
-export EKPUB=`openssl enc -base64 -A -in /tmp/ekpub.pem`
-echo $EKPUB
-
-# for the above its
-# LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUF5TExCMzd6UVRpM0tmS3JpZFBwWQp0ajl5S20wY2kvUVVHcXJ6QnNWVnF4cU9zUVV4b2NzYUtNWlBJTzdWeEpsSmQ4S0hXTW9HWTZmMVZPZE5VRkNOCnVmZzVXTXFBL3Q2clh2akY0TnRQVHZSMDVkQ1Y0SmVnQkJEbk9qRjlOZ21WNjcrTmdBbTNhZnEvWjFxdkozMzYKV1VvcDJwcmJUV3BzZU50ZGxwMis0VE9CU3NOWmdzdW0zQ0ZyNDBxSXNhMnJiOXhGRHJxb01UVmtnS0dwSmsregp0YStwY3hHWFlGSmZVOXNiN0Y3Y3MzZStUemp1Y0dGY3BWRWlGelZxNk1nYThjbWgzMnN1Zk0vUHVpZlZZU0xpCkJZVjRzNGM1M2dWcTd2ME9kYTlMcWF4VDJBOUVtS29wY1dVVThDRWdic0J4aG1WQWhzbkt3TERtSllLVUxrQWsKdXdJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==
-
-
-
-```
+##### PCR and Password policy
 
 For the PCR value, its encoded as comma-separated string of `PCR#=base64(lower(pcrvalue))`:
 
@@ -220,261 +325,7 @@ For the PCR value, its encoded as comma-separated string of `PCR#=base64(lower(p
 export PCRLIST="MD1kMGM3MGE5MzEwY2QwYjU1NzY3MDg0MzMzMDIyY2U1M2Y0MmJlZmJiNjljMDU5ZWU2YzBhMzI3NjZmMTYwNzgz"
 ```
 
-### Build Test application
-
-Build a small test application which we will encrypt
-
-```bash
-cd example/
-docker build -t app:server .
-
-export SSL_CERT_FILE=certs/tls-ca-chain.pem
-skopeo copy   docker-daemon:app:server  docker://localhost:5000/app:server
-# inspect the image; note its not encrypted
-skopeo inspect  docker://localhost:5000/app:server
-```
-
-### Encrypt
-
-Either build the provider or use one from the `Releases` page in the repo (to build you need golang as well)
-
-```bash
-cd plugin/
-go build -o tpm_oci_crypt main.go
-```
-
-and set the path to the binary you created, eg:
-
-```bash
-vi example/ocicrypt.json
-```
-
-set
-
-```json
-{
-  "key-providers": {
-    "tpm": {
-      "cmd": {
-        "path": "/root/ocicrypt-tpm-keyprovider/plugin/tpm_oci_crypt",
-        "args": ["--tpmPath=/dev/tpm0"]
-      }
-    }
-  }
-}
-```
-
-Now export the variables to bootstrap ocicrypt
-
-```bash
-cd example/
-export OCICRYPT_KEYPROVIDER_CONFIG=/root/ocicrypt-tpm-keyprovider/example/ocicrypt.json
-export SSL_CERT_FILE=certs/tls-ca-chain.pem
-
-## make sure you have the variables set (remember, no padding)
-echo $EKPUB
-echo $PCRLIST
-
-## now encrypt the last layer and copy to the docker daemon via skopeo:
-skopeo copy  --encrypt-layer=-1 --encryption-key="provider:tpm:tpm://ek?mode=encrypt&pub=$EKPUB&pcrs=$PCRLIST"   docker://localhost:5000/app:server docker://localhost:5000/app:encrypted
-
-## if you inspect the node, you should see something like the following that shows encrypted layers
-skopeo inspect docker://localhost:5000/app:encrypted
-```
-
-
-In my case, i pushed this image to dockerhub for you to see (you wont' be able to decrypt it...infact, i'll never be able to decrypt it since i shutdown the vm where the key resides)
-
-```bash
-skopeo copy  --preserve-digests  docker://localhost:5000/app:encrypted  docker://docker.io/salrashid123/ociencryptedapp:server
-```
-
-
-```json
-$ crane manifest docker.io/salrashid123/ociencryptedapp:server | jq '.'
-
-{
-  "schemaVersion": 2,
-  "mediaType": "application/vnd.oci.image.manifest.v1+json",
-  "config": {
-    "mediaType": "application/vnd.oci.image.config.v1+json",
-    "digest": "sha256:952ad55c903eaceb39b6803a89954a506fa312c295e4e2c67efb1ee63d837238",
-    "size": 2505
-  },
-  "layers": [
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "digest": "sha256:ef5c7eb8a1577c29c329af74dffacbedce1cd9b9938b42a09af0029ace8cc7e6",
-      "size": 87117
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "digest": "sha256:80f00805faa81bccdbddf9458369d8dede6a30de1dced521f32a6237aeca64c2",
-      "size": 20487
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "digest": "sha256:eb6702f4c235496acaa0a741db2a43a7d30f482004df4c02bdd384bd312e94b8",
-      "size": 620188
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "digest": "sha256:c4629cdd872fe25c2febaf12f30590cbf351e0f77afd6079268a6b417c87788c",
-      "size": 306
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "digest": "sha256:927ef23185e7d34c70bb0c9ac8bddf5665080cc821de3d16ac39cf4ee8cadc81",
-      "size": 196
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "digest": "sha256:c23224575d87af713e0ff736a737712b034548de621b3d20b8d9360ecc6a8e70",
-      "size": 115
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "digest": "sha256:b4aa04aa577f2b2f4b4a930e905d091b68b0719ec302b9abca710ffae50ebcaa",
-      "size": 384
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "digest": "sha256:4e700e4525b70ee0923a4ee04eb0d4f53b0424933e4fbece3f801af6be4d8c32",
-      "size": 350
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "digest": "sha256:b49267e860909c1e476d125b0b2057f9f17e8fa8484fa206e42466d91ee075e6",
-      "size": 123525
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "digest": "sha256:305e3b8ad18c2bb9fb124bf7f350deb361200a4056541a4860c1b4a9a4c9daf0",
-      "size": 5426220
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "digest": "sha256:84e64e6a79c8e6598eba2d9c01c4873b3310e7ce1de87253c170f6c8c898f962",
-      "size": 1950667
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "digest": "sha256:86af40164b8f3c89c539bda9e01800269205ae775cc46be95772a6237904c621",
-      "size": 936181
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-      "digest": "sha256:cc5fb384190effe65e3a772d1ce04f984c3c8dcb1ee2205cd27506b84f6b10fd",
-      "size": 4234075
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip+encrypted",
-      "digest": "sha256:d276f6e01c3764c493788236bc04998bc107bd98347943d06959ca148a180fed",
-      "size": 139,
-      "annotations": {
-        "org.opencontainers.image.enc.keys.provider.tpm": "eyJrZXlfdXJsIjoidHBtOi8vZWs/bW9kZT1lbmNyeXB0XHUwMDI2cHViPUxTMHRMUzFDUlVkSlRpQlFWVUpNU1VNZ1MwVlpMUzB0TFMwS1RVbEpRa2xxUVU1Q1oydHhhR3RwUnpsM01FSkJVVVZHUVVGUFEwRlJPRUZOU1VsQ1EyZExRMEZSUlVGNVRFeENNemQ2VVZScE0wdG1TM0pwWkZCd1dRcDBhamw1UzIwd1kya3ZVVlZIY1hKNlFuTldWbkY0Y1U5elVWVjRiMk56WVV0TldsQkpUemRXZUVwc1NtUTRTMGhYVFc5SFdUWm1NVlpQWkU1VlJrTk9DblZtWnpWWFRYRkJMM1EyY2xoMmFrWTBUblJRVkhaU01EVmtRMVkwU21WblFrSkViazlxUmpsT1oyMVdOamNyVG1kQmJUTmhabkV2V2pGeGRrb3pNellLVjFWdmNESndjbUpVVjNCelpVNTBaR3h3TWlzMFZFOUNVM05PV21kemRXMHpRMFp5TkRCeFNYTmhNbkppT1hoR1JISnhiMDFVVm10blMwZHdTbXNyZWdwMFlTdHdZM2hIV0ZsR1NtWlZPWE5pTjBZM1kzTXpaU3RVZW1wMVkwZEdZM0JXUldsR2VsWnhOazFuWVRoamJXZ3pNbk4xWmswdlVIVnBabFpaVTB4cENrSlpWalJ6TkdNMU0yZFdjVGQyTUU5a1lUbE1jV0Y0VkRKQk9VVnRTMjl3WTFkVlZUaERSV2RpYzBKNGFHMVdRV2h6Ymt0M1RFUnRTbGxMVlV4clFXc0tkWGRKUkVGUlFVSUtMUzB0TFMxRlRrUWdVRlZDVEVsRElFdEZXUzB0TFMwdENnPT1cdTAwMjZwY3JzPU1EMWtNR00zTUdFNU16RXdZMlF3WWpVMU56WTNNRGcwTXpNek1ESXlZMlUxTTJZME1tSmxabUppTmpsak1EVTVaV1UyWXpCaE16STNOalptTVRZd056Z3oiLCJzZXNzaW9uX2tleSI6IkNtd0FJTngyUWtSTHhtTW9mdzVCYjBpNGQxUXdjaGhmaDg4UHh1eWVSNTB0YU1XY0lvUlIrMCttQXVYY3lFeFFwdVNRbzhZK3FxVGZJS0lyU293UlI4cnBpdWY4WmRCMkJsMk1PenFVeHNoWUh2cUdyRENYUEpDNDlBTURnWUgwayt2OFFqMUY4L09IVnptS1F0QVNnQUs0S01rdlM1SUwzN3MxeU1SMlJLSDhEU1NDS1FtZ29EWldjMFA3a0tZNzc0c1hjUnZvQ2xORkVvZU44eUlXZnowSU1LT3NMVGZsdHR6SXpFOSs5ZDdzQ1Z5VW1FL1VrOCtSZ1JPVmdtSFZMZDJUUHFkc2xGNkgyemhQSVZ6dHJuQzNEMkZkUHJEZTVDNFF3Y3lYbytqdzAzVzRSS3UxOHZCZ3hVaHVGTE5SZXRkRXpjdVFFMlMyUVQ0Z29XWjdFNjd6NmxodHJlMndhUzI5ajFaZjYwKy9KcW9SOUtZRS9VZXk4ZlFFUVpQUWZTOUVQQkQxQ2NpMGpKek5oOVB6OUdPZmxGQ0orU1ZiMUtKa1hPT2Fub0ZDOHRGZCtrVnZSU1hDZEppTElFSjVPckoyakUxMmVRYUNXSkRpd0NEZXVOaUhhNmpGTXIvbTc2T05XRlpwbW1EekdrNEFDQUFMQUFBQWdBQWdBWll4YkROMDNvSnZTbmd2bXdEaER6UTQxSDhGWW9WNnBRQjdhQkJJa040QUVBQWdoZWFDUzA2K1U2cDU5c1M2Zmhnc3dsQW80QmI1V2lmRDJpOGpobTJxVnBjaUtBZ0xFaVFJQUJJZzBNY0treEROQzFWMmNJUXpNQ0xPVS9Rcjc3dHB3Rm51YkFveWRtOFdCNE09Iiwid3JhcHBlZF9rZXkiOiJLczlFUE1OK1BGSkFOd2t6ZjkrbXV3TDJ0cnM5QlMwTWZhZU1GMHBrbFlZR1BMeEhaSUxQYk11QXBJWnRoaGwyMmxDTTVQcnpnQTNhRzVoQXFKeWkvdGFwTkV1KzVyalFlWGZzTi9nek1KZWc1SEVKTFhEcEg5bDVYZzQ0Y2ZYQXg3clJVczYxUUpUL3dzUyt0N2s5eG5wYUljazgrZ0xpRUcvMjZ4T1RGRElqKzRXd1Q3emtSVlZQUk1ka0dvMy9Bdk9EYVJRTGVHZWJaL3lHT2ZaaTlyZVZISGhCd0hXTWltdURKQUdHRnRXZVV5Ukd6aGlRTE1mSlY2T0EyMmdZSUIrcHVqQ3FzaTNnMzkwa2NpaVZoRjNQMkJBc01Rc0FjSTE2L2JvPSIsIndyYXBfdHlwZSI6IkFFUyJ9",
-        "org.opencontainers.image.enc.pubopts": "eyJjaXBoZXIiOiJBRVNfMjU2X0NUUl9ITUFDX1NIQTI1NiIsImhtYWMiOiIrRDJqeTcxOVZFS2pFY0FkWFEra0UxYUtQZjJUYUhIU1IxajJBK0dlRzY0PSIsImNpcGhlcm9wdGlvbnMiOnt9fQ=="
-      }
-    }
-  ]
-}
-```
-
-if you decode the JWT, you'll see
-
-```json
-{
-  "key_url": "tpm://ek?mode=encrypt&pub=LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUF5TExCMzd6UVRpM0tmS3JpZFBwWQp0ajl5S20wY2kvUVVHcXJ6QnNWVnF4cU9zUVV4b2NzYUtNWlBJTzdWeEpsSmQ4S0hXTW9HWTZmMVZPZE5VRkNOCnVmZzVXTXFBL3Q2clh2akY0TnRQVHZSMDVkQ1Y0SmVnQkJEbk9qRjlOZ21WNjcrTmdBbTNhZnEvWjFxdkozMzYKV1VvcDJwcmJUV3BzZU50ZGxwMis0VE9CU3NOWmdzdW0zQ0ZyNDBxSXNhMnJiOXhGRHJxb01UVmtnS0dwSmsregp0YStwY3hHWFlGSmZVOXNiN0Y3Y3MzZStUemp1Y0dGY3BWRWlGelZxNk1nYThjbWgzMnN1Zk0vUHVpZlZZU0xpCkJZVjRzNGM1M2dWcTd2ME9kYTlMcWF4VDJBOUVtS29wY1dVVThDRWdic0J4aG1WQWhzbkt3TERtSllLVUxrQWsKdXdJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==&pcrs=MD1kMGM3MGE5MzEwY2QwYjU1NzY3MDg0MzMzMDIyY2U1M2Y0MmJlZmJiNjljMDU5ZWU2YzBhMzI3NjZmMTYwNzgz",
-  "session_key": "CmwAINx2QkRLxmMofw5Bb0i4d1Qwchhfh88PxuyeR50taMWcIoRR+0+mAuXcyExQpuSQo8Y+qqTfIKIrSowRR8rpiuf8ZdB2Bl2MOzqUxshYHvqGrDCXPJC49AMDgYH0k+v8Qj1F8/OHVzmKQtASgAK4KMkvS5IL37s1yMR2RKH8DSSCKQmgoDZWc0P7kKY774sXcRvoClNFEoeN8yIWfz0IMKOsLTflttzIzE9+9d7sCVyUmE/Uk8+RgROVgmHVLd2TPqdslF6H2zhPIVztrnC3D2FdPrDe5C4QwcyXo+jw03W4RKu18vBgxUhuFLNRetdEzcuQE2S2QT4goWZ7E67z6lhtre2waS29j1Zf60+/JqoR9KYE/Uey8fQEQZPQfS9EPBD1Cci0jJzNh9Pz9GOflFCJ+SVb1KJkXOOanoFC8tFd+kVvRSXCdJiLIEJ5OrJ2jE12eQaCWJDiwCDeuNiHa6jFMr/m76ONWFZpmmDzGk4ACAALAAAAgAAgAZYxbDN03oJvSngvmwDhDzQ41H8FYoV6pQB7aBBIkN4AEAAgheaCS06+U6p59sS6fhgswlAo4Bb5WifD2i8jhm2qVpciKAgLEiQIABIg0McKkxDNC1V2cIQzMCLOU/Qr77tpwFnubAoydm8WB4M=",
-  "wrapped_key": "Ks9EPMN+PFJANwkzf9+muwL2trs9BS0MfaeMF0pklYYGPLxHZILPbMuApIZthhl22lCM5PrzgA3aG5hAqJyi/tapNEu+5rjQeXfsN/gzMJeg5HEJLXDpH9l5Xg44cfXAx7rRUs61QJT/wsS+t7k9xnpaIck8+gLiEG/26xOTFDIj+4WwT7zkRVVPRMdkGo3/AvODaRQLeGebZ/yGOfZi9reVHHhBwHWMimuDJAGGFtWeUyRGzhiQLMfJV6OA22gYIB+pujCqsi3g390kciiVhF3P2BAsMQsAcI16/bo=",
-  "wrap_type": "AES"
-}
-```
-
-### Decrypt
-
-First try to run the image:
-
-```bash
-$ docker run localhost:5000/app:encrypted
-
-Unable to find image 'localhost:5000/app:encrypted' locally
-encrypted: Pulling from app
-ef5c7eb8a157: Already exists 
-80f00805faa8: Already exists 
-eb6702f4c235: Already exists 
-c4629cdd872f: Already exists 
-927ef23185e7: Already exists 
-c23224575d87: Already exists 
-b4aa04aa577f: Already exists 
-4e700e4525b7: Already exists 
-b49267e86090: Already exists 
-305e3b8ad18c: Already exists 
-84e64e6a79c8: Already exists 
-86af40164b8f: Already exists 
-4d04d94ae206: Already exists 
-407097943978: Extracting [==================================================>]     139B/139B
-docker: failed to register layer: unexpected EOF.
-
-```
-
-this wont' work because you dont have the key so copty the encrypted image over
-
-```bash
-cd example/
-export SSL_CERT_FILE=certs/tls-ca-chain.pem
-skopeo copy --decryption-key="provider:tpm:tpm://ek?mode=decrypt"  docker://localhost:5000/app:encrypted  docker://localhost:5000/app:decrypted
-```
-
-Now running it works
-
-```bash
-$ docker run localhost:5000/app:decrypted
-
-Unable to find image 'localhost:5000/app:decrypted' locally
-decrypted: Pulling from app
-ef5c7eb8a157: Already exists 
-d0725b4f7d72: Pull complete 
-Digest: sha256:accd86b929da7a547a384fa74e37a150a50df2ed2567baa9f1bf298f2093aec7
-Status: Downloaded newer image for localhost:5000/app:decrypted
-config {
-    "foo": "bar",
-    "bar": "bar"
-}
-Starting Server..
-```
-
-You can inspect the values in the registry to confirm encrypted status or not by running
-
-```bash
-skopeo inspect --tls-verify  docker://localhost:5000/app:encrypted
-skopeo inspect --tls-verify  docker://localhost:5000/app:decrypted
-
-crane manifest localhost:5000/app:encrypted | jq '.'
-crane manifest  localhost:5000/app:decrypted | jq '.'
-```
-
-## Invalid PCR value
-
-Finally, lets encrypt the image with a bad PCR value binding.  
-
-So lets make one up:
-
-```bash
-# 7=643c832d74ca5a76c27d7d88987f332ed2eb7222e1333e6abac8fd55635b59b0247d786bdedee42d7f7b04180b67c9ec
-## would be
-export PCRLIST="Nz02NDNjODMyZDc0Y2E1YTc2YzI3ZDdkODg5ODdmMzMyZWQyZWI3MjIyZTEzMzNlNmFiYWM4ZmQ1NTYzNWI1OWIwMjQ3ZDc4NmJkZWRlZTQyZDdmN2IwNDE4MGI2N2M5ZWM="
-
-# and push the aseline image to app:badimage
-skopeo copy  --encrypt-layer=-1 --encryption-key="provider:tpm:tpm://ek?mode=encrypt&pub=$EKPUB&pcrs=$PCRLIST"    docker-daemon:app:server docker://localhost:5000/app:badencrypted
-
-## now try to pull and run the image
-skopeo copy --decryption-key="provider:tpm:tpm://ek?mode=decrypt"  docker://localhost:5000/app:badencrypted docker://localhost:5000/app:stillbad
-
-no suitable key found for decrypting layer key:
-- Error while running command: /root/ocicrypt-tpm-keyprovider/plugin/tpm_oci_crypt. stderr: 2023/06/17 07:51:12 Error unwrapping key Unable to Import sealed data: unseal failed: session 1, error code 0x1d : a policy check failed
-: exit status 1
-```
+---
 
 
 ### Setup gRPC OCI KMS provider
@@ -490,7 +341,7 @@ To use, start the server
 ```bash
 cd grpc/
 
-go run server.go --tpmPath=/dev/tpm0
+go run server.go
 ```
 
 set the `OCICRYPT_KEYPROVIDER_CONFIG` file to use
@@ -515,13 +366,12 @@ Finally invoke the endpoints (note `provider:grpc-keyprovider` is used below)
 
 ```bash
 cd example/
-export SSL_CERT_FILE=certs/tls-ca-chain.pem
+export SSL_CERT_FILE=`pwd`/certs/tls-ca-chain.pem
 
 skopeo copy --encrypt-layer -1 \
   --encryption-key="provider:grpc-keyprovider:tpm://ek?mode=encrypt&pub=$EKPUB&pcrs=$PCRLIST" \
    docker-daemon:app:server docker://localhost:5000/app:encrypted
 
-skopeo copy --dest-tls-verify=false \
-  --decryption-key=provider:grpc-keyprovider:tpm://ek?mode=decrypt \
-    docker://localhost:5000/app:encrypted docker://localhost:5000/app:decrypted
+skopeo copy   --decryption-key="provider:grpc-keyprovider:tpm://ek?mode=decrypt&pub=$EKPUB&pcrs=$PCRLIST"  \
+      docker://localhost:5000/app:encrypted docker://localhost:5000/app:decrypted
 ```

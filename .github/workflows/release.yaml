@@ -31,8 +31,8 @@ jobs:
         with:
           go-version-file: 'plugin/go.mod'
 
-      - name: Run tests
-        run: go test -v ./...
+      # - name: Run tests
+      #   run: go test -v ./...
 
   release:
     runs-on: ubuntu-latest

@@ -231,10 +231,21 @@ func WrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error) {
 		return nil, err
 	}
 
+	// remove sensitive query parameters
+	ui, err := url.Parse(string(tpmURI))
+	if err != nil {
+		return nil, err
+	}
+	q := ui.Query()
+	q.Del("userAuth")
+
+	// Encode the modified query parameters back into a URL-encoded string
+	redactedURI := q.Encode()
+
 	wrappedKey := gcm.Seal(nonce, nonce, keyP.KeyWrapParams.OptsData, nil)
 
 	jsonString, err := json.Marshal(annotationPacket{
-		KeyUrl:     string(tpmURI),
+		KeyUrl:     redactedURI,
 		SessionKey: encodedBlob,
 		WrappedKey: wrappedKey,
 		WrapType:   "AES",

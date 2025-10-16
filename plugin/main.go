@@ -238,8 +238,6 @@ func WrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error) {
 	}
 	q := ui.Query()
 	q.Del("userAuth")
-
-	// Encode the modified query parameters back into a URL-encoded string
 	redactedURI := q.Encode()
 
 	wrappedKey := gcm.Seal(nonce, nonce, keyP.KeyWrapParams.OptsData, nil)

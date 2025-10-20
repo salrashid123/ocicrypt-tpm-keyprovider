@@ -1,0 +1,6 @@
+server = "https://registry.domain.com:5000"
+
+[host."https://registry.domain.com:5000"]
+  capabilities = ["pull", "resolve"]
+  skip_verify = true
+  #ca = "/path/to/ocicrypt-tpm-provider/example/certs/tls-ca-chain.pem"

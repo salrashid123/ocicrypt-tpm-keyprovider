@@ -35,6 +35,7 @@ const (
 
 var (
 	tpmPath = flag.String("tpm-path", "/dev/tpmrm0", "Path to the TPM device (character device or a Unix socket).")
+	tpmURI  = flag.String("tpmURI", "", "Path to TPM URI")
 )
 
 var TPMDEVICES = []string{"/dev/tpm0", "/dev/tpmrm0"}
@@ -71,6 +72,11 @@ func main() {
 
 	switch input.Operation {
 	case keyprovider.OpKeyWrap:
+		if *tpmURI != "" {
+			myMap := make(map[string][][]byte)
+			myMap["tpm"] = [][]byte{[]byte(*tpmURI)}
+			input.KeyWrapParams.Ec.Parameters = myMap
+		}
 
 		b, err := WrapKey(input)
 		if err != nil {
@@ -78,6 +84,12 @@ func main() {
 		}
 		fmt.Printf("%s", b)
 	case keyprovider.OpKeyUnwrap:
+		if *tpmURI != "" {
+			myMap := make(map[string][][]byte)
+			myMap["tpm"] = [][]byte{[]byte(*tpmURI)}
+			input.KeyUnwrapParams.Dc.Parameters = myMap
+		}
+
 		b, err := UnwrapKey(input)
 		if err != nil {
 			log.Fatalf("error unwrapping key %v\n", err)
@@ -92,11 +104,11 @@ func WrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error) {
 
 	_, ok := keyP.KeyWrapParams.Ec.Parameters[tpmCryptName]
 	if !ok {
-		return nil, fmt.Errorf("provider must be formatted as provider:tpm:tpm://ek?mode=encrypt&pub=base64(ekpem)&pcrs=[pcrlist] not set, got %s", keyP.KeyWrapParams.Ec.Parameters[tpmCryptName])
+		return nil, fmt.Errorf("provider must be formatted as provider:tpm:tpm://ek?&pub=base64(ekpem)&pcrs=[pcrlist] not set, got %s", keyP.KeyWrapParams.Ec.Parameters[tpmCryptName])
 	}
 
 	if len(keyP.KeyWrapParams.Ec.Parameters[tpmCryptName]) == 0 {
-		return nil, fmt.Errorf("provider must be formatted as provider:tpm:tpm://ek?mode=encrypt&pub=base64(ekpem)&pcrs=[pcrlist] got %s", keyP.KeyWrapParams.Ec.Parameters[tpmCryptName])
+		return nil, fmt.Errorf("provider must be formatted as provider:tpm:tpm://ek?&pub=base64(ekpem)&pcrs=[pcrlist] got %s", keyP.KeyWrapParams.Ec.Parameters[tpmCryptName])
 	}
 
 	// get the first configuration
@@ -105,7 +117,7 @@ func WrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error) {
 	// parse the uri
 	u, err := url.Parse(string(tpmURI))
 	if err != nil {
-		return nil, fmt.Errorf("error parsing Provider URL must be  provider:tpm:tpm://ek?mode=encrypt&pub=base64(ekpem)&pcrs=[pcrlist] got %s", tpmURI)
+		return nil, fmt.Errorf("error parsing Provider URL must be  provider:tpm:tpm://ek?pt&pub=base64(ekpem)&pcrs=[pcrlist] got %s", tpmURI)
 	}
 	if u.Scheme != tpmCryptName {
 		return nil, fmt.Errorf("error parsing Provider URL: unrecognized scheme got %s", u.Scheme)
@@ -114,13 +126,6 @@ func WrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error) {
 	m, err := url.ParseQuery(u.RawQuery)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing Provider URL: %v", err)
-	}
-
-	if m["mode"] == nil {
-		return nil, errors.New("error  mode=encrypt value must be set")
-	}
-	if m["mode"][0] != "encrypt" {
-		return nil, errors.New("error  mode=encrypt value must be set")
 	}
 
 	if m["pub"] == nil {
@@ -275,18 +280,18 @@ func UnwrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error)
 
 	_, ok := keyP.KeyUnwrapParams.Dc.Parameters[tpmCryptName]
 	if !ok {
-		return nil, errors.New("provider must be formatted as provider:tpm:tpm://ek?mode=decrypt")
+		return nil, errors.New("provider must be formatted as provider:tpm:tpm://ek?")
 	}
 
 	if len(keyP.KeyUnwrapParams.Dc.Parameters[tpmCryptName]) == 0 {
-		return nil, errors.New("provider must be formatted as  provider:tpm:tpm://ek?mode=decrypt")
+		return nil, errors.New("provider must be formatted as  provider:tpm:tpm://ek?t")
 	}
 
 	tpmURI := keyP.KeyUnwrapParams.Dc.Parameters[tpmCryptName][0]
 	// parse the uri
 	u, err := url.Parse(string(tpmURI))
 	if err != nil {
-		return nil, fmt.Errorf("error parsing Provider URL must be provider:tpm:tpm://ek?mode=decrypt got %s", tpmURI)
+		return nil, fmt.Errorf("error parsing Provider URL must be provider:tpm:tpm://ek? got %s", tpmURI)
 	}
 	if u.Scheme != tpmCryptName {
 		return nil, fmt.Errorf("error parsing Provider URL: unrecognized scheme got %s", u.Scheme)
@@ -294,12 +299,6 @@ func UnwrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error)
 	m, err := url.ParseQuery(u.RawQuery)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing Provider URL: %v", err)
-	}
-	if m["mode"] == nil {
-		return nil, errors.New("error  mode must be set for decryption")
-	}
-	if m["mode"][0] != "decrypt" {
-		return nil, errors.New("error  mode must set to decrypt")
 	}
 
 	// rwc, err := tpm2.OpenTPM(*tpmPath)

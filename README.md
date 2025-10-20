@@ -54,6 +54,14 @@ cd plugin/
 go build  -o /tmp/tpm_oci_crypt .
 ```
 
+also install
+
+* [skopeo](https://github.com/containers/skopeo/blob/main/install.md)
+* docker
+* [tpm2_tools](https://github.com/tpm2-software/tpm2-tools)
+* [imgcrypt](https://github.com/containerd/imgcrypt.git)
+* [nerdctl](https://github.com/containerd/nerdctl)
+
 ### QuickStart
 
 First start `swtpm` and export the public PEM files
@@ -91,7 +99,6 @@ You will need [skopeo](https://github.com/containers/skopeo) for this sample
 
 The sample below uses [swtpm](https://github.com/stefanberger/swtpm) and  [tpm2_tools](https://github.com/tpm2-software/tpm2-tools)
 
-
 Decryption must be done on the same TPM where that ekPub exists.
 
 First copy the `tpm_oci_crypt` binary onto the image and create an `ocicrypt.json` file that point to that
@@ -106,7 +113,7 @@ cd example/
 export OCICRYPT_KEYPROVIDER_CONFIG=`pwd`/ocicrypt.json
 ```
 
-`ocicrypt.json`:
+where `ocicrypt.json` includes the `tpmURI` and path to the TPM (in this case the swtpm)
 
 ```json
 {
@@ -114,7 +121,10 @@ export OCICRYPT_KEYPROVIDER_CONFIG=`pwd`/ocicrypt.json
     "tpm": {
       "cmd": {
         "path": "/tmp/tpm_oci_crypt",
-        "args": ["--tpm-path=127.0.0.1:2321"]
+        "args": [
+          "--tpm-path", "127.0.0.1:2321",
+          "--tpmURI", "tpm://ek?pub=LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUFqOFoyRDdocDZoeHhhazhJUGRGdQpJcVJUd3NRQml5Z2ZSVTh0QXJtbXFrREhnYmQ1NlRzUkZSeGtHaFBNUG53V2pVZ1lMeW5yeFYwRHhaK1liRTZICjRkbVExVGxRbTlBSVV0TnFkeEJDcEhXZUJvUC96K215bHQySTV5dlJIYVR6Zlk4dWtTWjNnTk5RR0x6Z2xqZTMKek05N0JtZUtwUzVRSE9RWHZZTjM2WkNxZ0RoREx1eExyQkh5SnE0MDVpOUllT2kxU1pkZUdyK1A0T0QvaGFOcwpnVS9yd2M5UStEVzRnZWp6VVJJb3ovWVc4S09BSzZBTERXS0gvVWRTMWkvZUdvS3VsczhUczNOVkhEQ2ZyZVpCCnYvdHhnQnRaNWZaVWYvZ2RFczNFVlJyK1BSL0hGRGlsUHBQemRIUUE4RlBRckhHbjlZREZ4VDdFdFhvS0RKN1EKaFFJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==&pcrs=MDowMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwCg=="
+        ]
       }
     },
     "grpc-keyprovider": {
@@ -122,6 +132,16 @@ export OCICRYPT_KEYPROVIDER_CONFIG=`pwd`/ocicrypt.json
     }
   }
 }
+```
+
+You can get the `tpmURI` by configuring it as such
+
+```bash
+export EKPUB=`openssl enc -base64 -A -in /tmp/ek.pem`
+echo $EKPUB
+export PCRLIST=`echo "0:0000000000000000000000000000000000000000000000000000000000000000" | base64 -w 0`
+
+echo "tpm://ek?pub=$EKPUB&pcrs=$PCRS"
 ```
 
 ##### Encrypt
@@ -139,13 +159,16 @@ export USERPASS=""
 export OCICRYPT_KEYPROVIDER_CONFIG=`pwd`/ocicrypt.json
 export SSL_CERT_FILE=`pwd`/certs/tls-ca-chain.pem
 
+# add to /etc/hosts
+# 127.0.0.1 registry.domain.com
+
 ### now encrypt
-skopeo copy  --encrypt-layer=-1 \
-  --encryption-key="provider:tpm:tpm://ek?mode=encrypt&pub=$EKPUB&pcrs=$PCRLIST&userAuth=$USERAUTH" \
-   docker://docker.io/salrashid123/app docker://localhost:5000/ociencryptedapp:server
+skopeo copy --encrypt-layer=-1 \
+  --encryption-key="provider:tpm:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST&userAuth=$USERAUTH" \
+   docker://docker.io/salrashid123/app docker://registry.domain.com:5000/app:encrypted
 
 ### look at the file encrypted file
-skopeo inspect  docker://localhost:5000/ociencryptedapp:server
+skopeo inspect  docker://registry.domain.com:5000/app:encrypted
 ```
 
 ```json
@@ -276,7 +299,7 @@ if you decode the key:
 
 ```json
 {
-  "key_url": "tpm://ek?mode=encrypt&pub=LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUF5WnJhZ2YweSs0eHV1THp5WFhyNgp4NVVNT09Id1V5emcrSm56S3UzSDZaU0Y4N0lSZlpsaWEzQWZDZkZETW9jSk1uRWlEVmF0bFJZZERNZWhHeGdwCmg1elJUUzJxYy9qeWFUQWRRdjU2dXRuWnFJdkhCZkpoV2hMYWJ5VGc4NTBoVEdlODB3OXA5WEc1bWEyM2tTbisKcVhHUlJSb3RzdGFIa1QrTFpBbmtmWlA0N2xHVkZPWHlvbTErREJWeks4ZVNJRTh3aGpYTm4xTVVuMzE4bTFzVAp2NkIxdmVNeFR5TGx0d0V3UGJpa3A5VExsQU9naG52NnF0VTZoVHVKQk1USUYzNEd5TUc2MHE5NFNKUjVGdU53CjJPMGZVamZRTGxneTkxY29LY0tiZ24rOE8xNllMbEtEeVhFcGU0ZjRCbUxtT213UXZOa1JxWnFBSEJyTWl6bWkKTndJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==&pcrs=MDowMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwCg==&userAuth=",
+  "key_url": "tpm://ek?pub=LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUF5WnJhZ2YweSs0eHV1THp5WFhyNgp4NVVNT09Id1V5emcrSm56S3UzSDZaU0Y4N0lSZlpsaWEzQWZDZkZETW9jSk1uRWlEVmF0bFJZZERNZWhHeGdwCmg1elJUUzJxYy9qeWFUQWRRdjU2dXRuWnFJdkhCZkpoV2hMYWJ5VGc4NTBoVEdlODB3OXA5WEc1bWEyM2tTbisKcVhHUlJSb3RzdGFIa1QrTFpBbmtmWlA0N2xHVkZPWHlvbTErREJWeks4ZVNJRTh3aGpYTm4xTVVuMzE4bTFzVAp2NkIxdmVNeFR5TGx0d0V3UGJpa3A5VExsQU9naG52NnF0VTZoVHVKQk1USUYzNEd5TUc2MHE5NFNKUjVGdU53CjJPMGZVamZRTGxneTkxY29LY0tiZ24rOE8xNllMbEtEeVhFcGU0ZjRCbUxtT213UXZOa1JxWnFBSEJyTWl6bWkKTndJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==&pcrs=MDowMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwCg==&userAuth=",
   "session_key": "eyJjaXBoZXJ0ZXh0IjoicG9nZUF4NDJORHVNSG9oamV1VDJhUTRmZDgweUVFa1BPc3graE0vQnFvWHE5YWlTVElleFMxdjVMVTM3WGV6TyIsIml2IjoidXRSY2Uxd25NV3h1bVJ0MiIsImtleUluZm8iOnsibWVjaGFuaXNtIjoiMSIsIndyYXBwZWRLZXkiOiJleUoyWlhKemFXOXVJam95TENKMGVYQmxJam9pUkZWUVRFbERRVlJGSWl3aWNHTnljeUk2VzNzaWRtRnNkV1VpT2lKQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUVVGQlFVRkJRVUZCUFNKOVhTd2laSFZ3YkdsallYUmxaRTl3SWpwN0ltdGxlV1pwYkdVaU9pSXRMUzB0TFVKRlIwbE9JRlJUVXpJZ1VGSkpWa0ZVUlNCTFJWa3RMUzB0TFZ4dVRVbEpRM0JCV1VkYU5FVkdRMmRGUlc5QlRVSkJaaXRvWjJOSmQyZGlPSGRPY1VGRlFXZEpRbVkyUlhWQ1EzZEJTVWRhYjJWeE16UlpjakV6WWtrdlFseHVhVFEyWm1wcFFVbHNlRk5HWW5WSmVuTTFRWEZYVWpCT1dIbHJiRUZCUVVGQlVVRk1RWGRGUVVGRVFYaHZRVkZEUVdkSFNXOVRhMFZLZDBGQlFVTkpRVnh1UXpKb2NrNTNPRWcyV21ScmJtZEtVMkZXVmpKNlVubFJWVmgxV20xQ2NubDNTMjVvTVdVNVVXRktWSE5CUkVKVGIwRlJRMEZuUm5odlZXOUZVMEZCUVZ4dVFVRkpRVWxCYXpnMk1FVlpTRlZsUVdsSFRGaHNSMHB2TjIxdldHOVJORGxITTIxNlNURkhPRloxVXl0eVR5OTNRVU5DUm10NEswRlVXRTlHYUZOdlVWeHVjWFJsTTBKck9VbFdNRXRQYUZGUWRWVnhOMU4yVVVSMU5VRmlhekJoUzBOQlVWbEZaMmRGUTBGUlFtaFpXbUYyUkhKbVNrRlRTelJ1TjBGaGFrRjFjbHh1Y1VsQ05EQTFMM1ZXUmxrd09XeDNlV2t6UkZZNFpEbE1kVmhOT1dkeVRXVkZXRTlRUVZoWVNEVkVZbWhNTlZOWGEyTjBSbEZuUkdSUFdteGtlbkpETkZ4dWNrRklXbmRRVmpsTmIyUnZWVTg0U1hsNlZVODNRVXhYUlVNMmMxUTNORWhJVXpScWFrbzBabmM1UVZGc2JVOVplbXRoT1c1NlVTdDBSekJyYjNSeU0xeHVSVWcyWmtaSE1WcG9SMmd3V21KaWRHbEJURVJ4ZGtSNmNXNXplSEpFY0ZJeWMwUndlWGswYTNGbk1FWlJVRzB2T0UxUmJtOHZNeXMyTVhodU9ESklRMXh1ZUhGWlowaFZabTFvWmsxQ2VFWktWVzUyY2s5aE5IcFlVbGxvYjAxMGNVMUdWelJGTUhCYWVFbG1iRzVYTTNCWk5IVmhNakp0YVZaQlNsTndVRmxrVFZ4dU9FaGtlbmx5TTFkdFEwcEJkaTh5VkRVd1RVTlRhWG92TjAwNFprNXJiVmxQUlVkM09FSkhkblpEWjNwM1ZtbGlVa3hNUkd4SFp6TkpUeTh6TnpsclZseHVRV2RTUVVGQlJrRkNSa0ZCVkdkQlNVRkJjMEZCUVVGQlFVTkNaeTgwZEdaVk4xY3dNamRzTmtJNWNFZE9PSGhwY2t4cVMwbGFSR3htTjNwelptMU1ORnh1TVRsSk5uWjNRVkZCUTBOc2MwaG9NalJyTlVOWWJFdFpabFpUZWxBeFpFUm5VRXM1VTJsd1YxVlJUSGxsUjNwdVdFeHVTM0JSVW5WQlIzZEJTVU16TjF4dWIxQkxka3QzWWtnM1JFSlBOMVJzWkZaWVNYaFRaMWRUWTJsU1NVVnhUemhLUldvM2FXaENabUZ4VTIxVmVtaExRbUk0ZVM5a2EwczFTa1JRUjBsTVoxeHVhRVU1YldodVdHNTZjVVUzYldVNEwxbEdVakZHTDNaRVQwWXJibEpNVjJWS1NUVnFPRlpWVkZReEwyNWlSMDF5Tml0cVJEQllaVFF6U1ZWNFduaHZWbHh1UW04ckswdzNWR1Z4ZVVrOVhHNHRMUzB0TFVWT1JDQlVVMU15SUZCU1NWWkJWRVVnUzBWWkxTMHRMUzFjYmlJc0luQmhjbVZ1ZEU1aGJXVWlPaUl3TURCaU5qZzJZak0zTUdZd04yVTVPVGMyTkRsbE1ESTFNalk1TlRVM05tTmtNV001TURVeE4ySTVPVGs0TVdGbU1tTXdZVGxsTVdRMVpXWTFNRFk0T1RSbFl5SXNJbVZyY0hWaUlqb2lUVzFSZVZwRVNtdE5iVkY1V2tSUmVVNUVWVEJPZWxFMVRrZFZlVTFFVlhkT1ZGVXdUV3BTYWs1RWF6Qk5la2wzVGtkSk1FNVVWVFZOYlZGNVdrUkthMDF0VVhsYVJFSm9Ua2RSTUU5VVVUVk9SRWt3VDFSYWFFNUVSVEJhVkZGNVRtcGpNbGxxWTNoT2FtY3lXV3BaTlU1RVkzcFBWR016VFhwQk1FMXFVWGhPVkVVd1RsUlJNazVFUlRCTlZGSnRUa1JOTUUxVVZYaE5lbWN3VFZSU2EwNUVhekJQVkZGNVRrUk5NazU2VW1sT1JFMHdUVlJWZUU1RVZUQk5WR00xVGxkRk0wMXFXWGhPYW1NeVRtcE5kMDU2YTNsWmFrMHdUbnBuTTA1VVl6Rk9SMDB6V1ZSak5VNVVaekZQUkdONVRYcFpkMWxVWXpSTmVsVXhUbFJTYTA1SFdUQmFhbEUwVG5wak1VNVVZelZPTWtVeVRucEthVTVIUlRKYVZHUm9Ua2RKTTA1VVRYcE9SR2Q2VG1wV2FFNVVUVEJPYWswMFRYcGpNRTlVVlhsT2Fsa3hXVlJhYWs1cWF6Sk5WRTE2VGtSRk1rNXFVWHBPYWxrd1RtcFJNRTVIVVRKYWFsbDZUa2RGTUZwRVdteE9SRlV5VDFSUk1FNVVXVEpOVkdNd1RtMU5NVTFxVlRWT2FsRXdUa1JTYTA1cVZUSlBSRkV6VG5wbk1rNTZZM2ROUjBVeVQwUk5NVTR5UlRGTmFsVXdUbFJOZWsxcVkzaE9hazE1V21wYWFFNTZhekpOVkZVd1RrUkZNazVFVlhoT2VsbDZUbFJOTWs1NlZUTk9SRnBzVGxkRk0wMVVVVFZPZWxrd1QwUlJlVTVxV1RCWlZGazBUbFJqTWs5RVVtcE9ha1V5VFdwak5VNVVVVEpPZWswMFRYcFZlazFFV1RST1ZGRXdUbnBaTVUxNlozcE5SR016VFhwck0wMUVUVFZPVkdjd1RucE5NVTV0VVRKTlZFMTVUWHBOTWxscVZYcE9iVlY1V1dwQ2FFNTZSVEZQUkZFelRsUkpNVTFxVlhsT2JWa3pUa1JqZWs1NlVUSk5WRkUwVG0xSk1VNUVTbWxPUjAweFdWUlJlRTV0VlRKWmFsa3lUbGRGTVUxRVRUQk5lbU15V1hwUk0wNVVXVEJPYWxKdFRsUm5NMDlVV20xT2JWRjZUVlJLYVU1RVVUQk5hbFV5VGpKRk1GbHFUVFJPYWxVeFRYcFJOVTVFVlhwUFJHTXpUbXBuTWxsVVZUUk9SMVV5V2xSTmVFNUhVVEZPVkZwc1RYcE5lazFVVFRST2JWRjZUVlJqZWs1VVVYZFpWR015VFhwWk1FMXFUWGhPZWxreVRsUlNhMDU2WnpGT1JHTTFUa2ROTWxsNll6Qk9lbU13VGxSak0wNVVRVEpOYWxrMVRtMUpNMDFFVFRWT1ZGRXdXWHBhYWs1RVJUQmFhbGt6VG1wbk1scFVZekpOZWxrelRWUmpNRTVVVlhwT2FsazBUbFJSTTA1VVVtaE9SRWt3V2tSVk1FNUVhekJPYWsxNlRYcFJNRTU2WXpWT1IxRXdUbnBOTWsxNlFUTk5WRTAxVFhwUk1VMTZVbWhPVkVsNlRsUlJNazU2VlRCYVZHTXpUVWRGZWsxcVVtMU5la0V5VG1wVk1VNXRSVEpPYWxWNFRrZE5NbGw2V1ROT2VtdDZUMVJOZUU1cVRUSmFhbEpwVG1wTk1GbHFXWGxPYW1NeVdsUkthVTE2WnpCYWFrMTRUWHBaTVU5VVVtcE9iVTB3V1dwUk1FNTZhekZQUkZFeFRucEJNazVVVFRCT2FsbDZUa1JSZVU1dFVUQlplbHByVGtkWk1scEVZek5PVkVVelRtcFNiRTV0U1RGTmFtTjRUbGRGTTAxVVVYaE9SR2N3VFdwamVVNUhVVEpQVkdSb1RtMVJNazlVUW1oT1IxVXpUbnBSTlU1RVVUQk5WRlY0VGtSRk1FMXFRbWhOYlZGNVdrUkthMDF0VVhsYVJGRXhUa2RWTUU1RVNYZE9WRUV4VGxSUmVVNUhUVEJQVkZGNlRXcEJNRmxxVVRGT1ZHdDVXa1JLYTAxdFVYbGFSRXByVFVkRlBTSjlmUT09In19",
   "wrapped_key": "cPJRoSGkruqfQAUKURdBf00wcKHCbHXNhc5HCHVmcLToVu/RDplxugoyJg9h3x6NSWCZ9G7obu+yRkKMdxojwcQ+s/9rcSF8VRfMBd9xJGnpRRTK4Mgfo434GXAQulkSYbbyNAhp4SNOCo29YlwqCoDNzd0hMTG8VNbIdkQEyCYueaVfer7jLYnFpxYwY+hEvZn0EM+ihNaLO12ICMx1zINjRIYtTY+hbfcU5dlRN+oBEsH0RHJ/A8vrNznGZtt956izDhdnljWhEVUjeU9mq6wPCA+TcjO1OiPdndI=",
   "wrap_type": "AES"
@@ -290,10 +313,10 @@ Note the last layer is encrypted; you can encrypt all the layers if you want
 To decrypt, just specify the mode
 
 ```bash
-skopeo copy  --decryption-key="provider:tpm:tpm://ek?mode=decrypt&pub=$EKPUB&pcrs=$PCRLIST&userAuth=$USERAUTH" \
-    docker://localhost:5000/ociencryptedapp:server docker://localhost:5000/app:decrypted
+skopeo copy  --decryption-key="provider:tpm:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST&userAuth=$USERAUTH" \
+    docker://registry.domain.com:5000/app:encrypted docker://registry.domain.com:5000/app:decrypted
 
-skopeo inspect  docker://localhost:5000/app:decrypted
+skopeo inspect  docker://registry.domain.com:5000/app:decrypted
 ```
 
 If you wanted to use an H2 image
@@ -302,11 +325,11 @@ export H2PUB=`openssl enc -base64 -A -in /tmp/key.pem`
 echo $H2PUB
 
 skopeo copy  --encrypt-layer=-1 \
-  --encryption-key="provider:tpm:tpm://ek?mode=encrypt&pub=$H2PUB&pcrs=$PCRLIST&userAuth=$USERAUTH&parentKeyType=H2" \
-   docker://docker.io/library/busybox docker://localhost:5000/ociencryptedapp:server
+  --encryption-key="provider:tpm:tpm://ek?pub=$H2PUB&pcrs=$PCRLIST&userAuth=$USERAUTH&parentKeyType=H2" \
+   docker://docker.io/salrashid123/app docker://registry.domain.com:5000/app:encrypted
 
-skopeo copy  --decryption-key="provider:tpm:tpm://ek?mode=decrypt&pub=$H2PUB&pcrs=$PCRLIST&userAuth=$USERAUTH&parentKeyType=H2" \
-    docker://localhost:5000/ociencryptedapp:server docker://localhost:5000/app:decrypted
+skopeo copy  --decryption-key="provider:tpm:tpm://ek?pub=$H2PUB&pcrs=$PCRLIST&userAuth=$USERAUTH&parentKeyType=H2" \
+    docker://registry.domain.com:5000/app:encrpted docker://registry.domain.com:5000/app:decrypted
 ```
 
 Note on using OCICrypt:  the image that is decrypted ...is decrypted so anyone who runs the command above can 'just copy' the image somewhere else, unarmored.  
@@ -369,9 +392,113 @@ cd example/
 export SSL_CERT_FILE=`pwd`/certs/tls-ca-chain.pem
 
 skopeo copy --encrypt-layer -1 \
-  --encryption-key="provider:grpc-keyprovider:tpm://ek?mode=encrypt&pub=$EKPUB&pcrs=$PCRLIST" \
-   docker-daemon:app:server docker://localhost:5000/app:encrypted
+  --encryption-key="provider:grpc-keyprovider:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST" \
+    docker://docker.io/salrashid123/app docker://registry.domain.com:5000/app:encrypted
 
-skopeo copy   --decryption-key="provider:grpc-keyprovider:tpm://ek?mode=decrypt&pub=$EKPUB&pcrs=$PCRLIST"  \
-      docker://localhost:5000/app:encrypted docker://localhost:5000/app:decrypted
+skopeo copy   --decryption-key="provider:grpc-keyprovider:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST"  \
+      docker://registry.domain.com:5000/app:encrypted docker://registry.domain.com:5000/app:decrypted
+```
+
+
+### Using containerd
+
+
+To use `containerd` can decrypt and run the image automatically, you first need to configure a stream processor pointing to the decryption functions.
+
+Basically, when containerd detects an encrypted image, it will expect an external process to provide the decrypted image layer.
+
+To do this, we will need [imgcrypt](https://github.com/containerd/imgcrypt.git) installed as well.
+
+
+First configure `ocicrypt.json` to include the `tpmURI`
+
+```bash
+cd example/
+export OCICRYPT_KEYPROVIDER_CONFIG=`pwd`/ocicrypt.json
+export SSL_CERT_FILE=`pwd`/certs/tls-ca-chain.pem
+```
+
+- `ocicrypt.json`:
+
+```json
+{
+  "key-providers": {
+    "tpm": {
+      "cmd": {
+        "path": "/tmp/tpm_oci_crypt",
+        "args": [
+          "--tpm-path", "127.0.0.1:2321",
+          "--tpmURI", "tpm://ek?pub=LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUFqOFoyRDdocDZoeHhhazhJUGRGdQpJcVJUd3NRQml5Z2ZSVTh0QXJtbXFrREhnYmQ1NlRzUkZSeGtHaFBNUG53V2pVZ1lMeW5yeFYwRHhaK1liRTZICjRkbVExVGxRbTlBSVV0TnFkeEJDcEhXZUJvUC96K215bHQySTV5dlJIYVR6Zlk4dWtTWjNnTk5RR0x6Z2xqZTMKek05N0JtZUtwUzVRSE9RWHZZTjM2WkNxZ0RoREx1eExyQkh5SnE0MDVpOUllT2kxU1pkZUdyK1A0T0QvaGFOcwpnVS9yd2M5UStEVzRnZWp6VVJJb3ovWVc4S09BSzZBTERXS0gvVWRTMWkvZUdvS3VsczhUczNOVkhEQ2ZyZVpCCnYvdHhnQnRaNWZaVWYvZ2RFczNFVlJyK1BSL0hGRGlsUHBQemRIUUE4RlBRckhHbjlZREZ4VDdFdFhvS0RKN1EKaFFJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==&pcrs=MDowMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwCg=="
+        ]
+      }
+    },
+    "grpc-keyprovider": {
+      "grpc": "localhost:50051"
+    }
+  }
+}
+```
+
+* install [imgcrypt](https://github.com/containerd/imgcrypt.git)
+
+```bash
+git clone git clone https://github.com/containerd/imgcrypt.git
+cd imgcrypt
+make
+sudo make install  ##    install to /usr/local/bin/ctd-decoder
+```
+
+* install [nerdctl](https://github.com/containerd/nerdctl)
+
+
+* build `tpm_oci_crypt` 
+
+```bash
+cd plugin
+go build -o /tmp/tpm_oci_crypt .
+```
+
+* encrypt the raw image from dockerhub to your local registry
+
+```bash
+skopeo copy --encrypt-layer=-1 \
+  --encryption-key="provider:tpm:tpm://ek?mode=encrypt&pub=$EKPUB&pcrs=$PCRLIST" \
+   docker://docker.io/salrashid123/app docker://registry.domain.com:5000/app:encrypted
+```
+
+* start `containerd`
+
+Note, that to avoid conflicts the system's containerd, the config specifies to use the socket and config in the /tmp/ folder:
+
+edit `example/config.toml` the stream processor to point to your config file:
+
+```conf
+[stream_processors]
+  [stream_processors."io.containerd.ocicrypt.decoder.v1.tar.gzip"]
+    accepts = ["application/vnd.oci.image.layer.v1.tar+gzip+encrypted"]
+    returns = "application/vnd.oci.image.layer.v1.tar+gzip"
+    path = "/usr/local/bin/ctd-decoder"
+    env = ["OCICRYPT_KEYPROVIDER_CONFIG=/path/to/ocicrypt-tpm-keyprovider/example/ocicrypt.json"]
+       
+  [stream_processors."io.containerd.ocicrypt.decoder.v1.tar"]
+    accepts = ["application/vnd.oci.image.layer.v1.tar+encrypted"]
+    returns = "application/vnd.oci.image.layer.v1.tar"
+    path = "/usr/local/bin/ctd-decoder"
+    env = ["OCICRYPT_KEYPROVIDER_CONFIG=/path/to/ocicrypt-tpm-keyprovider/example/ocicrypt.json"]
+```
+
+```bash
+sudo /usr/bin/containerd -c config.toml
+```
+
+*  to run the image
+
+```bash
+### clean all images
+sudo  nerdctl --insecure-registry  --debug-full  --address /tmp/run/containerd/containerd.sock system prune --all
+
+### dun the encrypted image which will get decrypted on the fly
+sudo  nerdctl --insecure-registry  --debug-full \
+   --address /tmp/run/containerd/containerd.sock run -ti \
+    registry.domain.com:5000/app:encrypted
 ```

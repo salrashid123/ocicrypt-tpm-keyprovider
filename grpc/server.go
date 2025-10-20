@@ -35,6 +35,7 @@ var (
 	grpcport = flag.String("grpcport", ":50051", "grpcport")
 
 	tpmPath = flag.String("tpm-path", "127.0.0.1:2321", "Path to the TPM device (character device or a Unix socket).")
+	tpmURI  = flag.String("tpmURI", "", "Path to TPM URI")
 )
 
 var TPMDEVICES = []string{"/dev/tpm0", "/dev/tpmrm0"}
@@ -68,11 +69,17 @@ type annotationPacket struct {
 }
 
 func (*server) WrapKey(ctx context.Context, request *keyproviderpb.KeyProviderKeyWrapProtocolInput) (*keyproviderpb.KeyProviderKeyWrapProtocolOutput, error) {
-	fmt.Println("calling WrapKey")
+
 	var keyP keyprovider.KeyProviderKeyWrapProtocolInput
 	err := json.Unmarshal(request.KeyProviderKeyWrapProtocolInput, &keyP)
 	if err != nil {
 		return nil, err
+	}
+
+	if *tpmURI != "" {
+		myMap := make(map[string][][]byte)
+		myMap["tpm"] = [][]byte{[]byte(*tpmURI)}
+		keyP.KeyWrapParams.Ec.Parameters = myMap
 	}
 
 	_, ok := keyP.KeyWrapParams.Ec.Parameters[tpmCryptName]
@@ -99,13 +106,6 @@ func (*server) WrapKey(ctx context.Context, request *keyproviderpb.KeyProviderKe
 	m, err := url.ParseQuery(u.RawQuery)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing Provider URL: %v", err)
-	}
-
-	if m["mode"] == nil {
-		return nil, errors.New("error  mode=encrypt value must be set")
-	}
-	if m["mode"][0] != "encrypt" {
-		return nil, errors.New("error  mode=encrypt value must be set")
 	}
 
 	if m["pub"] == nil {
@@ -238,12 +238,17 @@ func (*server) WrapKey(ctx context.Context, request *keyproviderpb.KeyProviderKe
 }
 
 func (*server) UnWrapKey(ctx context.Context, request *keyproviderpb.KeyProviderKeyWrapProtocolInput) (*keyproviderpb.KeyProviderKeyWrapProtocolOutput, error) {
-	fmt.Println("got unwrap")
 
 	var keyP keyprovider.KeyProviderKeyWrapProtocolInput
 	err := json.Unmarshal(request.KeyProviderKeyWrapProtocolInput, &keyP)
 	if err != nil {
 		return nil, err
+	}
+
+	if *tpmURI != "" {
+		myMap := make(map[string][][]byte)
+		myMap["tpm"] = [][]byte{[]byte(*tpmURI)}
+		keyP.KeyUnwrapParams.Dc.Parameters = myMap
 	}
 
 	apkt := annotationPacket{}
@@ -278,12 +283,6 @@ func (*server) UnWrapKey(ctx context.Context, request *keyproviderpb.KeyProvider
 	m, err := url.ParseQuery(u.RawQuery)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing Provider URL: %v", err)
-	}
-	if m["mode"] == nil {
-		return nil, errors.New("error  mode must be set for decryption")
-	}
-	if m["mode"][0] != "decrypt" {
-		return nil, errors.New("error  mode must set to decrypt")
 	}
 
 	// rwc, err := tpm2.OpenTPM(*tpmPath)

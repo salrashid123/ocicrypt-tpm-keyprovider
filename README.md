@@ -141,7 +141,7 @@ export EKPUB=`openssl enc -base64 -A -in /tmp/ek.pem`
 echo $EKPUB
 export PCRLIST=`echo "0:0000000000000000000000000000000000000000000000000000000000000000" | base64 -w 0`
 
-echo "tpm://ek?pub=$EKPUB&pcrs=$PCRS"
+echo "tpm://ek?pub=$EKPUB&pcrs=$PCRLIST"
 ```
 
 ##### Encrypt
@@ -156,6 +156,7 @@ echo $EKPUB
 
 export PCRLIST=`echo "0:0000000000000000000000000000000000000000000000000000000000000000" | base64 -w 0`
 export USERPASS=""
+
 export OCICRYPT_KEYPROVIDER_CONFIG=`pwd`/ocicrypt.json
 export SSL_CERT_FILE=`pwd`/certs/tls-ca-chain.pem
 
@@ -164,7 +165,7 @@ export SSL_CERT_FILE=`pwd`/certs/tls-ca-chain.pem
 
 ### now encrypt
 skopeo copy --encrypt-layer=-1 \
-  --encryption-key="provider:tpm:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST&userAuth=$USERAUTH" \
+  --encryption-key="provider:tpm:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST" \
    docker://docker.io/salrashid123/app docker://registry.domain.com:5000/app:encrypted
 
 ### look at the file encrypted file
@@ -313,7 +314,7 @@ Note the last layer is encrypted; you can encrypt all the layers if you want
 To decrypt, just specify the mode
 
 ```bash
-skopeo copy  --decryption-key="provider:tpm:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST&userAuth=$USERAUTH" \
+skopeo copy  --decryption-key="provider:tpm:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST" \
     docker://registry.domain.com:5000/app:encrypted docker://registry.domain.com:5000/app:decrypted
 
 skopeo inspect  docker://registry.domain.com:5000/app:decrypted

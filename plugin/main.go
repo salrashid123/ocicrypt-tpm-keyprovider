@@ -34,8 +34,9 @@ const (
 )
 
 var (
-	tpmPath = flag.String("tpm-path", "/dev/tpmrm0", "Path to the TPM device (character device or a Unix socket).")
-	tpmURI  = flag.String("tpmURI", "", "Path to TPM URI")
+	tpmPath  = flag.String("tpm-path", "/dev/tpmrm0", "Path to the TPM device (character device or a Unix socket).")
+	tpmURI   = flag.String("tpmURI", "", "Path to TPM URI")
+	debugLog = flag.String("debugLog", "", "Path to debuglog")
 )
 
 var TPMDEVICES = []string{"/dev/tpm0", "/dev/tpmrm0"}
@@ -63,6 +64,17 @@ type annotationPacket struct {
 func main() {
 
 	flag.Parse()
+
+	if *debugLog != "" {
+		file, err := os.OpenFile(*debugLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+		if err != nil {
+			log.Printf("error opening log file: %v", err)
+		}
+		defer file.Close()
+		log.SetOutput(file)
+		log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+	}
+
 	var input keyprovider.KeyProviderKeyWrapProtocolInput
 	err := json.NewDecoder(os.Stdin).Decode(&input)
 	if err != nil {
@@ -73,9 +85,10 @@ func main() {
 	switch input.Operation {
 	case keyprovider.OpKeyWrap:
 		if *tpmURI != "" {
-			myMap := make(map[string][][]byte)
-			myMap["tpm"] = [][]byte{[]byte(*tpmURI)}
-			input.KeyWrapParams.Ec.Parameters = myMap
+			if len(input.KeyWrapParams.Ec.Parameters) == 0 {
+				input.KeyWrapParams.Ec.Parameters = make(map[string][][]byte)
+			}
+			input.KeyWrapParams.Ec.Parameters[tpmCryptName] = [][]byte{[]byte(*tpmURI)}
 		}
 
 		b, err := WrapKey(input)
@@ -84,10 +97,12 @@ func main() {
 		}
 		fmt.Printf("%s", b)
 	case keyprovider.OpKeyUnwrap:
+		// if the user specified it in command line, set that as the parameter value
 		if *tpmURI != "" {
-			myMap := make(map[string][][]byte)
-			myMap["tpm"] = [][]byte{[]byte(*tpmURI)}
-			input.KeyUnwrapParams.Dc.Parameters = myMap
+			if len(input.KeyUnwrapParams.Dc.Parameters) == 0 {
+				input.KeyUnwrapParams.Dc.Parameters = make(map[string][][]byte)
+			}
+			input.KeyUnwrapParams.Dc.Parameters[tpmCryptName] = [][]byte{[]byte(*tpmURI)}
 		}
 
 		b, err := UnwrapKey(input)
@@ -288,6 +303,10 @@ func UnwrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error)
 	}
 
 	tpmURI := keyP.KeyUnwrapParams.Dc.Parameters[tpmCryptName][0]
+
+	if bytes.Equal(tpmURI, []byte(apkt.KeyUrl)) {
+		return nil, fmt.Errorf("keyURI mismatch [%s] \n [%s]", string(tpmURI), apkt.KeyUrl)
+	}
 	// parse the uri
 	u, err := url.Parse(string(tpmURI))
 	if err != nil {

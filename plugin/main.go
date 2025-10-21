@@ -252,18 +252,10 @@ func WrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error) {
 	}
 
 	// remove sensitive query parameters
-	ui, err := url.Parse(string(tpmURI))
-	if err != nil {
-		return nil, err
-	}
-	q := ui.Query()
-	q.Del("userAuth")
-	redactedURI := q.Encode()
-
 	wrappedKey := gcm.Seal(nonce, nonce, keyP.KeyWrapParams.OptsData, nil)
 
 	jsonString, err := json.Marshal(annotationPacket{
-		KeyUrl:     redactedURI,
+		KeyUrl:     string(tpmURI),
 		SessionKey: encodedBlob,
 		WrappedKey: wrappedKey,
 		WrapType:   "AES",
@@ -290,23 +282,29 @@ func UnwrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error)
 		return nil, err
 	}
 
+	// load up the keyURL if its in the packet
+	tpmURI := apkt.KeyUrl
 	encryptedSessionKey := apkt.SessionKey
 	ciphertext := apkt.WrappedKey
 
+	// now load it from the parameter; the paramater has the saved value the user specified in the commandline args
+	//  the parameter value should take precedent over apkt.KeyUrl
 	_, ok := keyP.KeyUnwrapParams.Dc.Parameters[tpmCryptName]
-	if !ok {
-		return nil, errors.New("provider must be formatted as provider:tpm:tpm://ek?")
+	if ok {
+		if len(keyP.KeyUnwrapParams.Dc.Parameters[tpmCryptName]) == 0 && apkt.KeyUrl == "" {
+			return nil, errors.New("decrypt Provider must be formatted as tpm://ek?pub=$H2PUB&pcrs=$PCRLIST")
+		}
+		tpmURI = string(keyP.KeyUnwrapParams.Dc.Parameters[tpmCryptName][0])
 	}
 
-	if len(keyP.KeyUnwrapParams.Dc.Parameters[tpmCryptName]) == 0 {
-		return nil, errors.New("provider must be formatted as  provider:tpm:tpm://ek?t")
+	if tpmURI == "" {
+		return nil, errors.New("tpmURI cannot be nil")
 	}
 
-	tpmURI := keyP.KeyUnwrapParams.Dc.Parameters[tpmCryptName][0]
-
-	if bytes.Equal(tpmURI, []byte(apkt.KeyUrl)) {
-		return nil, fmt.Errorf("keyURI mismatch [%s] \n [%s]", string(tpmURI), apkt.KeyUrl)
+	if tpmURI != apkt.KeyUrl {
+		return nil, fmt.Errorf("tpmURI parameter and keyURL in structure are different parameter [%s], keyURL [%s]", tpmURI, apkt.KeyUrl)
 	}
+
 	// parse the uri
 	u, err := url.Parse(string(tpmURI))
 	if err != nil {
@@ -343,14 +341,15 @@ func UnwrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error)
 		pcrValues = strings.TrimSuffix(string(pcrValuesbytes), "\n")
 	}
 
-	userAuth := ""
-	if m["userAuth"] != nil {
-		userAuthBytes, err := base64.StdEncoding.DecodeString(m["userAuth"][0])
-		if err != nil {
-			return nil, fmt.Errorf("error parsing pcr encoding: %v", err)
-		}
-		userAuth = strings.TrimSuffix(string(userAuthBytes), "\n")
-	}
+	// todo: find some way to use userAuth
+	// userAuth := ""
+	// if m["userAuth"] != nil {
+	// 	userAuthBytes, err := base64.StdEncoding.DecodeString(m["userAuth"][0])
+	// 	if err != nil {
+	// 		return nil, fmt.Errorf("error parsing pcr encoding: %v", err)
+	// 	}
+	// 	userAuth = strings.TrimSuffix(string(userAuthBytes), "\n")
+	// }
 
 	isH2Parent := false
 	if m["parentKeyType"] != nil {
@@ -367,15 +366,15 @@ func UnwrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error)
 		_, err = wrapper.SetConfig(ctx, wrapping.WithConfigMap(map[string]string{
 			tpmwrap.TPM_PATH:              *tpmPath,
 			tpmwrap.ENCRYPTING_PUBLIC_KEY: hex.EncodeToString(pubPEMData),
-			tpmwrap.USER_AUTH:             userAuth,
-			tpmwrap.PCR_VALUES:            pcrValues,
+			//tpmwrap.USER_AUTH:             userAuth,
+			tpmwrap.PCR_VALUES: pcrValues,
 		}), tpmwrap.WithParentKeyH2(true))
 	} else {
 		_, err = wrapper.SetConfig(ctx, wrapping.WithConfigMap(map[string]string{
 			tpmwrap.TPM_PATH:              *tpmPath,
 			tpmwrap.ENCRYPTING_PUBLIC_KEY: hex.EncodeToString(pubPEMData),
-			tpmwrap.USER_AUTH:             userAuth,
-			tpmwrap.PCR_VALUES:            pcrValues,
+			//tpmwrap.USER_AUTH:             userAuth,
+			tpmwrap.PCR_VALUES: pcrValues,
 		}))
 	}
 	if err != nil {

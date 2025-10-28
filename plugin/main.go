@@ -193,28 +193,12 @@ func WrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error) {
 
 	wrapper := tpmwrap.NewRemoteWrapper()
 
-	if isH2Parent {
-		_, err = wrapper.SetConfig(ctx, wrapping.WithConfigMap(map[string]string{
-			tpmwrap.ENCRYPTING_PUBLIC_KEY: hex.EncodeToString(pubPEMData),
-			tpmwrap.PCR_VALUES:            pcrValues,
-			tpmwrap.USER_AUTH:             userAuth,
-			tpmwrap.PARENT_KEY_H2:         "true",
-			// tpmwrap.HIERARCHY_AUTH:        hierarchyPass,
-			// tpmwrap.KEY_NAME:              *keyName,
-
-		}))
-	} else {
-		_, err = wrapper.SetConfig(ctx, wrapping.WithConfigMap(map[string]string{
-			tpmwrap.ENCRYPTING_PUBLIC_KEY: hex.EncodeToString(pubPEMData),
-			tpmwrap.PCR_VALUES:            pcrValues,
-			tpmwrap.USER_AUTH:             userAuth,
-
-			// tpmwrap.HIERARCHY_AUTH:        hierarchyPass,
-			// tpmwrap.KEY_NAME:              *keyName,
-
-		}))
-	}
-
+	_, err = wrapper.SetConfig(ctx,
+		tpmwrap.WithEncryptingPublicKey(hex.EncodeToString(pubPEMData)),
+		tpmwrap.WithPCRValues(pcrValues),
+		tpmwrap.WithUserAuth(userAuth),
+		tpmwrap.WithParentKeyH2(isH2Parent),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("error creating wrapper %v", err)
 	}
@@ -362,21 +346,13 @@ func UnwrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error)
 	ctx := context.Background()
 	wrapper := tpmwrap.NewRemoteWrapper()
 
-	if isH2Parent {
-		_, err = wrapper.SetConfig(ctx, wrapping.WithConfigMap(map[string]string{
-			tpmwrap.TPM_PATH:              *tpmPath,
-			tpmwrap.ENCRYPTING_PUBLIC_KEY: hex.EncodeToString(pubPEMData),
-			//tpmwrap.USER_AUTH:             userAuth,
-			tpmwrap.PCR_VALUES: pcrValues,
-		}), tpmwrap.WithParentKeyH2(true))
-	} else {
-		_, err = wrapper.SetConfig(ctx, wrapping.WithConfigMap(map[string]string{
-			tpmwrap.TPM_PATH:              *tpmPath,
-			tpmwrap.ENCRYPTING_PUBLIC_KEY: hex.EncodeToString(pubPEMData),
-			//tpmwrap.USER_AUTH:             userAuth,
-			tpmwrap.PCR_VALUES: pcrValues,
-		}))
-	}
+	_, err = wrapper.SetConfig(ctx,
+		tpmwrap.WithTPMPath(*tpmPath),
+		tpmwrap.WithEncryptingPublicKey(hex.EncodeToString(pubPEMData)),
+		tpmwrap.WithPCRValues(pcrValues),
+		//tpmwrap.WithUserAuth(userAuth),
+		tpmwrap.WithParentKeyH2(isH2Parent),
+	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating wrapper %v\n", err)
 		os.Exit(1)

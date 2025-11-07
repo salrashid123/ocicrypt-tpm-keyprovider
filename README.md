@@ -127,9 +127,6 @@ where `ocicrypt.json` includes the `tpmURI` and path to the TPM (in this case th
           "--tpmURI", "tpm://ek?pub=LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUFqOFoyRDdocDZoeHhhazhJUGRGdQpJcVJUd3NRQml5Z2ZSVTh0QXJtbXFrREhnYmQ1NlRzUkZSeGtHaFBNUG53V2pVZ1lMeW5yeFYwRHhaK1liRTZICjRkbVExVGxRbTlBSVV0TnFkeEJDcEhXZUJvUC96K215bHQySTV5dlJIYVR6Zlk4dWtTWjNnTk5RR0x6Z2xqZTMKek05N0JtZUtwUzVRSE9RWHZZTjM2WkNxZ0RoREx1eExyQkh5SnE0MDVpOUllT2kxU1pkZUdyK1A0T0QvaGFOcwpnVS9yd2M5UStEVzRnZWp6VVJJb3ovWVc4S09BSzZBTERXS0gvVWRTMWkvZUdvS3VsczhUczNOVkhEQ2ZyZVpCCnYvdHhnQnRaNWZaVWYvZ2RFczNFVlJyK1BSL0hGRGlsUHBQemRIUUE4RlBRckhHbjlZREZ4VDdFdFhvS0RKN1EKaFFJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==&pcrs=MDowMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwCg=="
         ]
       }
-    },
-    "grpc-keyprovider": {
-      "grpc": "localhost:50051"
     }
   }
 }
@@ -340,7 +337,6 @@ Note on using OCICrypt:  the image that is decrypted ...is decrypted so anyone w
 
 ---
 
-
 ##### PCR policy
 
 For the PCR value, its encoded as comma-separated string of `PCR#=base64(lower(pcrvalue))`:
@@ -378,12 +374,6 @@ set the `OCICRYPT_KEYPROVIDER_CONFIG` file to use
 ```json
 {
   "key-providers": {
-    "tpm": {
-      "cmd": {
-        "path": "/path/to/tpm_oci_crypt",
-        "args": []
-      }
-    },
     "grpc-keyprovider": {
       "grpc": "localhost:50051"
     }
@@ -405,9 +395,7 @@ skopeo copy   --decryption-key="provider:grpc-keyprovider:tpm://ek?pub=$EKPUB&pc
       docker://registry.domain.com:5000/app:encrypted docker://registry.domain.com:5000/app:decrypted
 ```
 
-
 ### Using containerd
-
 
 To use `containerd` can decrypt and run the image automatically, you first need to configure a stream processor pointing to the decryption functions.
 

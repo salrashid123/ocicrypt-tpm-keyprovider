@@ -15,16 +15,12 @@ import (
 	"log"
 	"net"
 	"net/url"
-	"os"
-	"slices"
 	"strings"
 
 	"github.com/containers/ocicrypt/keywrap/keyprovider"
 	keyproviderpb "github.com/containers/ocicrypt/utils/keyprovider"
 	wrapping "github.com/hashicorp/go-kms-wrapping/v2"
 	tpmwrap "github.com/salrashid123/go-tpm-wrapping"
-
-	"github.com/google/go-tpm/tpmutil"
 
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -38,18 +34,8 @@ var (
 	tpmURI  = flag.String("tpmURI", "", "Path to TPM URI")
 )
 
-var TPMDEVICES = []string{"/dev/tpm0", "/dev/tpmrm0"}
-
-func OpenTPM(path string) (io.ReadWriteCloser, error) {
-	if slices.Contains(TPMDEVICES, path) {
-		return tpmutil.OpenTPM(path)
-	} else {
-		return net.Dial("tcp", path)
-	}
-}
-
 const (
-	tpmCryptName = "grpc-keyprovider"
+	tpmCryptName = "grpc-tpm-keyprovider"
 )
 
 type server struct {
@@ -126,14 +112,19 @@ func (*server) WrapKey(ctx context.Context, request *keyproviderpb.KeyProviderKe
 		pcrValues = strings.TrimSuffix(string(pcrValuesbytes), "\n")
 	}
 
-	// userAuth := ""
-	// if m["userAuth"] != nil {
-	// 	userAuthBytes, err := base64.StdEncoding.DecodeString(m["userAuth"][0])
-	// 	if err != nil {
-	// 		return nil, fmt.Errorf("error parsing pcr encoding: %v", err)
-	// 	}
-	// 	userAuth = strings.TrimSuffix(string(userAuthBytes), "\n")
-	// }
+	userAuth := ""
+	if m["userAuth"] != nil {
+		userAuthBytes, err := base64.StdEncoding.DecodeString(m["userAuth"][0])
+		if err != nil {
+			return nil, fmt.Errorf("error parsing pcr encoding: %v", err)
+		}
+		userAuth = strings.TrimSuffix(string(userAuthBytes), "\n")
+
+		q := u.Query()
+		q.Del("userAuth")
+		u.RawQuery = q.Encode()
+		tpmURI = []byte(u.String())
+	}
 
 	isH2Parent := false
 	if m["parentKeyType"] != nil {
@@ -141,6 +132,11 @@ func (*server) WrapKey(ctx context.Context, request *keyproviderpb.KeyProviderKe
 		if parentKeyType == "H2" {
 			isH2Parent = true
 		}
+	}
+
+	var aad []byte
+	if m["aad"] != nil {
+		aad = []byte(m["aad"][0])
 	}
 
 	// block, _ := pem.Decode(pubPEMData)
@@ -161,16 +157,16 @@ func (*server) WrapKey(ctx context.Context, request *keyproviderpb.KeyProviderKe
 		tpmwrap.WithTPMPath(*tpmPath),
 		tpmwrap.WithEncryptingPublicKey(hex.EncodeToString(pubPEMData)),
 		tpmwrap.WithPCRValues(pcrValues),
+		tpmwrap.WithUserAuth(userAuth),
 		tpmwrap.WithParentKeyH2(isH2Parent),
 	)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating wrapper %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("error creating wrapper %v\n", err)
 	}
 
 	//wrapper.SetConfig(ctx, tpmwrap.WithDebug(true))
 
-	blobInfo, err := wrapper.Encrypt(ctx, sessionKey)
+	blobInfo, err := wrapper.Encrypt(ctx, sessionKey, wrapping.WithAad(aad))
 	if err != nil {
 		return nil, fmt.Errorf("error encrypting %v", err)
 	}
@@ -212,9 +208,12 @@ func (*server) WrapKey(ctx context.Context, request *keyproviderpb.KeyProviderKe
 		return nil, fmt.Errorf("error encoding annotation Packet: %v", err)
 	}
 
-	protocolOuputSerialized, _ := json.Marshal(keyprovider.KeyProviderKeyWrapProtocolOutput{
+	protocolOuputSerialized, err := json.Marshal(keyprovider.KeyProviderKeyWrapProtocolOutput{
 		KeyWrapResults: keyprovider.KeyWrapResults{Annotation: jsonString},
 	})
+	if err != nil {
+		return nil, fmt.Errorf("error marshalling KeyProviderKeyWrapProtocolOutput: %v", err)
+	}
 
 	return &keyproviderpb.KeyProviderKeyWrapProtocolOutput{
 		KeyProviderKeyWrapProtocolOutput: protocolOuputSerialized,
@@ -260,9 +259,9 @@ func (*server) UnWrapKey(ctx context.Context, request *keyproviderpb.KeyProvider
 		return nil, errors.New("tpmURI cannot be nil")
 	}
 
-	if tpmURI != apkt.KeyUrl {
-		return nil, fmt.Errorf("tpmURI parameter and keyURL in structure are different parameter [%s], keyURL [%s]", tpmURI, apkt.KeyUrl)
-	}
+	// if tpmURI != apkt.KeyUrl {
+	// 	return nil, fmt.Errorf("tpmURI parameter and keyURL in structure are different parameter [%s], keyURL [%s]", tpmURI, apkt.KeyUrl)
+	// }
 
 	// parse the uri
 
@@ -277,12 +276,6 @@ func (*server) UnWrapKey(ctx context.Context, request *keyproviderpb.KeyProvider
 	if err != nil {
 		return nil, fmt.Errorf("error parsing Provider URL: %v", err)
 	}
-
-	// rwc, err := tpm2.OpenTPM(*tpmPath)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("error: can't open TPM %s: %v", *tpmPath, err)
-	// }
-	// defer rwc.Close()
 
 	if m["pub"] == nil {
 		return nil, errors.New("error  /pub/ value must be set")
@@ -318,6 +311,11 @@ func (*server) UnWrapKey(ctx context.Context, request *keyproviderpb.KeyProvider
 		}
 	}
 
+	var aad []byte
+	if m["aad"] != nil {
+		aad = []byte(m["aad"][0])
+	}
+
 	wrapper := tpmwrap.NewRemoteWrapper()
 
 	_, err = wrapper.SetConfig(ctx,
@@ -328,28 +326,25 @@ func (*server) UnWrapKey(ctx context.Context, request *keyproviderpb.KeyProvider
 		tpmwrap.WithParentKeyH2(isH2Parent),
 	)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating wrapper %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("error creating wrapper %v\n", err)
 	}
 
 	newBlobInfo := &wrapping.BlobInfo{}
 	err = protojson.Unmarshal(encryptedSessionKey, newBlobInfo)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error unmarshalling %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("error unmarshalling %v\n", err)
 	}
 
-	sessionKey, err := wrapper.Decrypt(ctx, newBlobInfo)
+	sessionKey, err := wrapper.Decrypt(ctx, newBlobInfo, wrapping.WithAad(aad))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error decrypting %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("error decrypting %v\n", err)
 	}
 
 	c, err := aes.NewCipher(sessionKey)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create AES Cipher data: %v", err)
 	}
-	gcm, _ := cipher.NewGCM(c)
+	gcm, err := cipher.NewGCM(c)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create GCM: %v", err)
 	}
@@ -360,9 +355,13 @@ func (*server) UnWrapKey(ctx context.Context, request *keyproviderpb.KeyProvider
 		return nil, fmt.Errorf("uable to decrypt with GCM: %v", err)
 	}
 
-	protocolOuputSerialized, _ := json.Marshal(keyprovider.KeyProviderKeyWrapProtocolOutput{
+	protocolOuputSerialized, err := json.Marshal(keyprovider.KeyProviderKeyWrapProtocolOutput{
 		KeyUnwrapResults: keyprovider.KeyUnwrapResults{OptsData: unwrappedKey},
 	})
+	if err != nil {
+		return nil, fmt.Errorf("error marshalling KeyProviderKeyWrapProtocolOutput: %v", err)
+	}
+
 	return &keyproviderpb.KeyProviderKeyWrapProtocolOutput{
 		KeyProviderKeyWrapProtocolOutput: protocolOuputSerialized,
 	}, nil
@@ -372,19 +371,6 @@ func main() {
 
 	flag.Parse()
 
-	var err error
-
-	rwc, err := OpenTPM(*tpmPath)
-	if err != nil {
-		fmt.Printf("Error: can't open TPM %s: %v", *tpmPath, err)
-		os.Exit(1)
-	}
-
-	err = rwc.Close()
-	if err != nil {
-		log.Fatalf("error closing tpm: %v", err)
-	}
-
 	log.Println("Starting server")
 	lis, err := net.Listen("tcp", *grpcport)
 	if err != nil {
@@ -392,7 +378,6 @@ func main() {
 	}
 
 	sopts := []grpc.ServerOption{grpc.MaxConcurrentStreams(10)}
-	sopts = append(sopts)
 
 	s := grpc.NewServer(sopts...)
 	keyproviderpb.RegisterKeyProviderServiceServer(s, &server{})

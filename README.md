@@ -1,49 +1,31 @@
 ## OCICrypt provider for Trusted Platform Modules (TPM)
 
-Basic [OCICrypt KeyProvider](https://github.com/containers/ocicrypt/blob/main/docs/keyprovider.md) for TPM 
+[OCICrypt KeyProvider](https://github.com/containers/ocicrypt/blob/main/docs/keyprovider.md) for `TPM`. 
 
 This repo includes a prebuilt and customizable keyprovider which can be used to encrypt OCI Containers using a given TPM's `Endorsement Public Key (EKPub)`.
 
-[OCICrypt](https://github.com/containers/ocicrypt) includes specifications to encrypt an OCI Container image and within that, the keyprovider protocol allows wrapping of the actual key used to encrypt the layer to an external binary.
+Basically, you can encrypt an OCI container image such that it can only get decrypted by a specific TPM with optional constraints on the PCR values the TPM has.
 
-The binary in this question accepts a keyprovider request and inturn perform two further rounds of envelope encryption where the innermost key is bound to the TPM.
+In the end, the image itself is encrypted run as shown below and is unusable without decryption.  In the case below, just the last layer was encrypted; you can encrypt all of them if you want.
 
-Basically, TPM wraps the symmetric key that is used to encrypt the layer itself.
-
-This sample is based off of the [simple-oci-keyprovider](https://github.com/lumjjb/simple-ocicrypt-keyprovider.git) repo which demonstrates the protocol involved.
-
-For more information, see 
-
-- [Advancing container image security with encrypted container images](https://developer.ibm.com/articles/advancing-image-security-encrypted-container-images/)
-- [Enabling advanced key usage and management in encrypted container images](https://developer.ibm.com/articles/enabling-advanced-key-usage-and-management-in-encrypted-container-images/)
-- [Container Image Encryption & Decryption in the CoCo project](https://medium.com/kata-containers/confidential-containers-and-encrypted-container-images-fc4cdb332dec)
-- [OCICrypt Container Image KMS Provider](https://github.com/salrashid123/ocicrypt-kms-keyprovider)
-
-`ocicrypt` comes with default support for [PKCS11 support](https://github.com/containers/ocicrypt/blob/main/docs/pkcs11.md) already and you are free to apply a [TPM PKCS-11](https://github.com/tpm2-software/tpm2-pkcs11).  However, the specific path used by the ocicrypt utilizes an RSA Public key associated to a key derived from the `Storage Root Key (SRK)`.  Its similar to [this](https://github.com/salrashid123/tpm2/tree/master/encrypt_with_tpm_rsa) procedure.
-
-While using the PKCS interface should work, the child RSA key should be attested and associated with the specific TPM first (i.,e you need to do remote attestation and the AK needs to certify the child key).  You also need to install the PKCS module on the target system...which is a bit of a pain.
-
-This repo on the other hand uses the `Endorsement Publickey (EKPub)` directly to wrap an inner encryption key which is itself encrypts the oci metadata for the container image.
-
-Basically, its a bit easier to use the EKPub because its usually something you can derive from a TPM Public x509 certificate (`EKCert`).
-
-If a user has the EKPub key, you can encrypt some data such that *it can only* be decrypted on that TPM alone (nowhere else).
-
-Furthermore, you can stipulate that the decryption has to be bound to certain PCR values.
-
-The specific encryption/decryption and binding is described in [Sealing RSA and Symmetric keys with TPMs](https://github.com/salrashid123/gcp_tpm_sealed_keys/tree/main#sealed-symmetric-key)
-
-Anyway, this repo shows how you can encrypt some data with an EKPub anywhere and have it only decrypted on a specific TPM (presumably after the remote system attested and verified)
-
-In the end, the image itself is encrypted as shown below (in this case, just the last layer was encrypted; you can encrypt all of them if you want)
-
-
->> NOTE: this code is not supported by google.  caveat emptor
+the layer has `"MIMEType": "application/vnd.oci.image.layer.v1.tar+gzip+encrypted"`
 
 ![images/manifest.png](images/manifest.png)
 
----
+The specific encryption/decryption and binding is described in 
 
+- [Go-TPM-Wrapping - Go library for encrypting data using Trusted Platform Module (TPM)](https://github.com/salrashid123/go-tpm-wrapping)
+
+For more information, see the `Background` section in this readme.
+
+>> NOTE: this code is not supported by google.  caveat emptor
+
+Other variants of ocicrypt key wrapping:
+
+* [OCICrypt Container Image Post Quantum Cryptography Provider](https://github.com/salrashid123/ocicrypt-pqc-keyprovider)
+* [OCICrypt Container Image KMS Provider](https://github.com/salrashid123/ocicrypt-kms-keyprovider)
+
+---
 
 #### Build
 
@@ -61,14 +43,18 @@ also install
 * [tpm2_tools](https://github.com/tpm2-software/tpm2-tools)
 * [imgcrypt](https://github.com/containerd/imgcrypt.git)
 * [nerdctl](https://github.com/containerd/nerdctl)
+* [swtpm](https://github.com/stefanberger/swtpm)
 
 ### QuickStart
 
-First start `swtpm` and export the public PEM files
+For a demo, we'll use a software TPM
 
 ```bash
 cd /tmp/
-rm -rf myvtpm && mkdir myvtpm  && swtpm_setup --tpmstate myvtpm --tpm2 --create-ek-cert &&    swtpm socket --tpmstate dir=myvtpm --tpm2 --server type=tcp,port=2321 --ctrl type=tcp,port=2322 --flags not-need-init,startup-clear --log level=2
+rm -rf myvtpm && mkdir myvtpm 
+swtpm_setup --tpmstate myvtpm --tpm2 --create-ek-cert 
+swtpm socket --tpmstate dir=myvtpm --tpm2 \
+    --server type=tcp,port=2321 --ctrl type=tcp,port=2322 --flags not-need-init,startup-clear --log level=2
 
 ### in a new window
 export TPM2TOOLS_TCTI="swtpm:port=2321"
@@ -77,17 +63,14 @@ export TPM2TOOLS_TCTI="swtpm:port=2321"
 tpm2_createek -c /tmp/ek.ctx -G rsa -u /tmp/ek.pub 
 tpm2_readpublic -c /tmp/ek.ctx -o /tmp/ek.pem -f PEM -n /tmp/ek.name
 tpm2_flushcontext -t
-
-### with H2
-# printf '\x00\x00' > unique.dat
-# tpm2_createprimary -C o -G ecc  -g sha256 \
-#    -c /tmp/primary.ctx -a "fixedtpm|fixedparent|sensitivedataorigin|userwithauth|noda|restricted|decrypt" -u unique.dat
-# tpm2_readpublic -c /tmp/primary.ctx -o /tmp/key.pem -f PEM -n /tmp/key.name
 ```
 
 Then run a local registry
 
 ```bash
+# add to /etc/hosts
+# 127.0.0.1 registry.domain.com
+
 cd example/
 docker run  -p 5000:5000 -v `pwd`/certs:/certs \
   -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/localhost.crt \
@@ -105,7 +88,7 @@ Decryption must be done on the same TPM where that ekPub exists.
 First copy the `tpm_oci_crypt` binary onto the image and create an `ocicrypt.json` file that point to that
 
 
-##### Configure ocicrypt plugin
+#### Configure ocicrypt plugin
 
 First set an env var instructing skopeo on where to find the binary 
 
@@ -124,7 +107,7 @@ where `ocicrypt.json` includes the `tpmURI` and path to the TPM (in this case th
         "path": "/tmp/tpm_oci_crypt",
         "args": [
           "--tpm-path", "127.0.0.1:2321",
-          "--tpmURI", "tpm://ek?pub=LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUFqOFoyRDdocDZoeHhhazhJUGRGdQpJcVJUd3NRQml5Z2ZSVTh0QXJtbXFrREhnYmQ1NlRzUkZSeGtHaFBNUG53V2pVZ1lMeW5yeFYwRHhaK1liRTZICjRkbVExVGxRbTlBSVV0TnFkeEJDcEhXZUJvUC96K215bHQySTV5dlJIYVR6Zlk4dWtTWjNnTk5RR0x6Z2xqZTMKek05N0JtZUtwUzVRSE9RWHZZTjM2WkNxZ0RoREx1eExyQkh5SnE0MDVpOUllT2kxU1pkZUdyK1A0T0QvaGFOcwpnVS9yd2M5UStEVzRnZWp6VVJJb3ovWVc4S09BSzZBTERXS0gvVWRTMWkvZUdvS3VsczhUczNOVkhEQ2ZyZVpCCnYvdHhnQnRaNWZaVWYvZ2RFczNFVlJyK1BSL0hGRGlsUHBQemRIUUE4RlBRckhHbjlZREZ4VDdFdFhvS0RKN1EKaFFJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==&pcrs=MDowMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwCg=="
+          "--tpmURI", "tpm://ek?pub=LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUFqOFoyRDdocDZoeHhhazhJUGRGdQpJcVJUd3NRQml5Z2ZSVTh0QXJtbXFrREhnYmQ1NlRzUkZSeGtHaFBNUG53V2pVZ1lMeW5yeFYwRHhaK1liRTZICjRkbVExVGxRbTlBSVV0TnFkeEJDcEhXZUJvUC96K215bHQySTV5dlJIYVR6Zlk4dWtTWjNnTk5RR0x6Z2xqZTMKek05N0JtZUtwUzVRSE9RWHZZTjM2WkNxZ0RoREx1eExyQkh5SnE0MDVpOUllT2kxU1pkZUdyK1A0T0QvaGFOcwpnVS9yd2M5UStEVzRnZWp6VVJJb3ovWVc4S09BSzZBTERXS0gvVWRTMWkvZUdvS3VsczhUczNOVkhEQ2ZyZVpCCnYvdHhnQnRaNWZaVWYvZ2RFczNFVlJyK1BSL0hGRGlsUHBQemRIUUE4RlBRckhHbjlZREZ4VDdFdFhvS0RKN1EKaFFJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg=="
         ]
       }
     }
@@ -137,11 +120,28 @@ You can get the `tpmURI` by configuring it as such
 ```bash
 cd example/
 export EKPUB=`openssl enc -base64 -A -in /tmp/ek.pem`
-export PCRLIST=`echo "0:0000000000000000000000000000000000000000000000000000000000000000" | base64 -w 0`
-
-echo "tpm://ek?pub=$EKPUB&pcrs=$PCRLIST"
-
+echo "tpm://ek?pub=$EKPUB"
 envsubst < "ocicrypt.tmpl" > "ocicrypt.json"
+```
+
+>> **IMPORTANT**, the parameters specified in `ocicrypt.json` take priority to whatever you specify in the command line (eg with `skopeo`  shown below).  If you want to directly only use the parameters in the command line, omit the `--tpmURI` argument in `ocicrypt.json`
+
+In otherwords, the value set in the `tpmURI=` below always takes precedence (if set).
+
+```json
+{
+  "key-providers": {
+    "tpm": {
+      "cmd": {
+        "path": "/tmp/tpm_oci_crypt",
+        "args": [
+          "--tpm-path", "127.0.0.1:2321",
+          "--tpmURI", "tpm://ek?pub=$EKPUB"
+        ]
+      }
+    }
+  }
+}
 ```
 
 ##### Encrypt
@@ -152,20 +152,11 @@ First
 ```bash
 cd example/
 export EKPUB=`openssl enc -base64 -A -in /tmp/ek.pem`
-echo $EKPUB
-
-export PCRLIST=`echo "0:0000000000000000000000000000000000000000000000000000000000000000" | base64 -w 0`
-export USERPASS=""
-
 export OCICRYPT_KEYPROVIDER_CONFIG=`pwd`/ocicrypt.json
 export SSL_CERT_FILE=`pwd`/certs/tls-ca-chain.pem
 
-# add to /etc/hosts
-# 127.0.0.1 registry.domain.com
-
-### now encrypt
 skopeo copy --encrypt-layer=-1 \
-  --encryption-key="provider:tpm:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST" \
+  --encryption-key="provider:tpm:tpm://ek?pub=$EKPUB" \
    docker://docker.io/salrashid123/app docker://registry.domain.com:5000/app:encrypted
 
 ### look at the file encrypted file
@@ -314,46 +305,139 @@ Note the last layer is encrypted; you can encrypt all the layers if you want
 To decrypt, just specify the mode
 
 ```bash
-skopeo copy  --decryption-key="provider:tpm:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST" \
+skopeo copy  --decryption-key="provider:tpm:tpm://ek?pub=$EKPUB" \
     docker://registry.domain.com:5000/app:encrypted docker://registry.domain.com:5000/app:decrypted
 
 skopeo inspect  docker://registry.domain.com:5000/app:decrypted
 ```
 
-If you wanted to use an H2 image
+Note on using OCICrypt:  the image that is decrypted ...is decrypted so anyone who runs the command above can 'just copy' the image somewhere else, unarmored.  
+
+##### Using H2 Template
+
+If instead of the EK pub you wanted to use the [H2 EK template](https://github.com/salrashid123/tpm2genkey)
+
+To encrypt.
+
+For the H2 image, you need to add an extra parameter to the uri:  `&parentKeyType=H2`
+
 ```bash
+printf '\x00\x00' > unique.dat
+tpm2_createprimary -C o -G ecc  -g sha256 \
+   -c /tmp/primary.ctx -a "fixedtpm|fixedparent|sensitivedataorigin|userwithauth|noda|restricted|decrypt" -u unique.dat
+tpm2_readpublic -c /tmp/primary.ctx -o /tmp/key.pem -f PEM -n /tmp/key.name
+
 export H2PUB=`openssl enc -base64 -A -in /tmp/key.pem`
-echo $H2PUB
-
 skopeo copy  --encrypt-layer=-1 \
-  --encryption-key="provider:tpm:tpm://ek?pub=$H2PUB&pcrs=$PCRLIST&parentKeyType=H2" \
+  --encryption-key="provider:tpm:tpm://ek?pub=$H2PUB&parentKeyType=H2" \
    docker://docker.io/salrashid123/app docker://registry.domain.com:5000/app:encrypted
-
-skopeo copy  --decryption-key="provider:tpm:tpm://ek?pub=$H2PUB&pcrs=$PCRLIST&parentKeyType=H2" \
-    docker://registry.domain.com:5000/app:encrpted docker://registry.domain.com:5000/app:decrypted
 ```
 
-Note on using OCICrypt:  the image that is decrypted ...is decrypted so anyone who runs the command above can 'just copy' the image somewhere else, unarmored.  
+To decrypt,
+
+```bash
+export H2PUB=`openssl enc -base64 -A -in /tmp/key.pem`
+
+skopeo copy  --decryption-key="provider:tpm:tpm://ek?pub=$H2PUB&parentKeyType=H2" \
+    docker://registry.domain.com:5000/app:encrypted docker://registry.domain.com:5000/app:decrypted
+```
 
 ---
 
 ##### PCR policy
 
-For the PCR value, its encoded as comma-separated string of `PCR#=base64(lower(pcrvalue))`:
+For the PCR value, its encoded as comma-separated string of `&pcrs=base64(lower(pcrvalue))` and set the parameter  `--tpmURI=tpm://ek?pub=$EKPUB&pcrs=$PCRLIST"`
 
 ```bash
-# 0=d0c70a9310cd0b55767084333022ce53f42befbb69c059ee6c0a32766f160783
-## so for me it was encoded as
-## export PCRLIST=`echo -n "0=d0c70a9310cd0b55767084333022ce53f42befbb69c059ee6c0a32766f160783" | openssl enc -base64 -A -in -`
-export PCRLIST="MD1kMGM3MGE5MzEwY2QwYjU1NzY3MDg0MzMzMDIyY2U1M2Y0MmJlZmJiNjljMDU5ZWU2YzBhMzI3NjZmMTYwNzgz"
+$ tpm2_pcrread sha256:23
+  sha256:
+    23: 0x0000000000000000000000000000000000000000000000000000000000000000
+
+## so for me it was encoded as pcr_bank:hexvalue
+## export PCRLIST=`echo -n "23:0000000000000000000000000000000000000000000000000000000000000000" | openssl enc -base64 -A -in -`
+export PCRLIST="MDowMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw"
+```
+which means when you encrypt or decrypt, add `&pcrs=$PCRLIST` the query parameter
+
+```bash
+# encrypt
+skopeo copy --encrypt-layer=-1 \
+  --encryption-key="provider:tpm:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST" \
+   docker://docker.io/salrashid123/app docker://registry.domain.com:5000/app:encrypted
+
+#decrypt
+skopeo copy --decryption-key="provider:tpm:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST" \
+     docker://registry.domain.com:5000/app:encrypted docker://registry.domain.com:5000/app:decrypted
+
+# to test failure, extend the pcr
+tpm2_pcrextend 23:sha256=0x0000000000000000000000000000000000000000000000000000000000000000
+tpm2_pcrread sha256:23
+## decryption should fail now
 ```
 
-TODO: passwword policy
+##### Password policy
+
+(exprimental) If you want the key to be bound by password, specify  `userAuth=base64(password)` in the tpmURI.
+
+Note, since the full `tpmURI` is itself encoded in plantext in the oci layer metadata, this specific attribute is omitted.
+
+You must explicitly specify the password in the commandline or specify it statically in `ocicrypt.json`.  (yes, its a bit limiting and awkward but so far i coudn't devise a clean workaround).
+
+To encrypt/decrypt:
+
+```bash
+export USERAUTH=`echo -n "fooo" | base64 -w 0`
+skopeo copy --encrypt-layer=-1 \
+  --encryption-key="provider:tpm:tpm://ek?pub=$EKPUB&userAuth=$USERAUTH" \
+   docker://docker.io/salrashid123/app docker://registry.domain.com:5000/app:encrypted
+
+# skopeo inspect  docker://registry.domain.com:5000/app:encrypted
+
+skopeo copy --decryption-key="provider:tpm:tpm://ek?pub=$EKPUB&userAuth=$USERAUTH" \
+     docker://registry.domain.com:5000/app:encrypted docker://registry.domain.com:5000/app:decrypted
+```
+
+If you cannot specify the parameter (eg, when using containerd or grpc), you will have to set it in `ocicrypt.json`:
+
+```json
+{
+  "key-providers": {
+    "tpm": {
+      "cmd": {
+        "path": "/tmp/tpm_oci_crypt",
+        "args": [
+          "--tpm-path", "127.0.0.1:2321",
+          "--tpmURI", "tpm://ek?pub=$EKPUB&userAuth=$USERAUTH"
+        ]
+      }
+    }
+  }
+}
+```
+
+### Debug Log
+
+To enable debug logging on the provider, set the  `"--debugLog"` paramter in the ocicrypt conf file:
+
+```json
+{
+  "key-providers": {
+    "tpm": {
+      "cmd": {
+        "path": "/tmp/tpm_oci_crypt",
+        "args": [
+          "--tpm-path", "127.0.0.1:2321",
+          "--debugLog", "/tmp/debug.log"
+        ]
+      }
+    }
+  }
+}
+```
 
 ---
 
-
-### Setup gRPC OCI KMS provider
+### Setup gRPC OCI provider
 
 Included in this repo is a grpc service which you can use as the key provider.
 
@@ -366,7 +450,7 @@ To use, start the server
 ```bash
 cd grpc/
 
-go run server.go --tpm-path="127.0.0.1:2321" --tpmURI="tpm://ek?pub=$EKPUB&pcrs=$PCRLIST"
+go run server.go --tpm-path="127.0.0.1:2321" --tpmURI="tpm://ek?pub=$EKPUB"
 ```
 
 set the `OCICRYPT_KEYPROVIDER_CONFIG` file to use
@@ -374,24 +458,24 @@ set the `OCICRYPT_KEYPROVIDER_CONFIG` file to use
 ```json
 {
   "key-providers": {
-    "grpc-keyprovider": {
+    "grpc-tpm-keyprovider": {
       "grpc": "localhost:50051"
     }
   }
 }
 ```
 
-Finally invoke the endpoints (note `provider:grpc-keyprovider` is used below)
+Finally invoke the endpoints (note `provider:grpc-tpm-keyprovider` is used below)
 
 ```bash
 cd example/
 export SSL_CERT_FILE=`pwd`/certs/tls-ca-chain.pem
 
 skopeo copy --encrypt-layer -1 \
-  --encryption-key="provider:grpc-keyprovider:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST" \
+  --encryption-key="provider:grpc-tpm-keyprovider:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST" \
     docker://docker.io/salrashid123/app docker://registry.domain.com:5000/app:encrypted
 
-skopeo copy   --decryption-key="provider:grpc-keyprovider:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST"  \
+skopeo copy   --decryption-key="provider:grpc-tpm-keyprovider:tpm://ek?pub=$EKPUB&pcrs=$PCRLIST"  \
       docker://registry.domain.com:5000/app:encrypted docker://registry.domain.com:5000/app:decrypted
 ```
 
@@ -402,7 +486,6 @@ To use `containerd` can decrypt and run the image automatically, you first need 
 Basically, when containerd detects an encrypted image, it will expect an external process to provide the decrypted image layer.
 
 To do this, we will need [imgcrypt](https://github.com/containerd/imgcrypt.git) installed as well.
-
 
 First configure `ocicrypt.json` to include the `tpmURI`
 
@@ -422,11 +505,11 @@ export SSL_CERT_FILE=`pwd`/certs/tls-ca-chain.pem
         "path": "/tmp/tpm_oci_crypt",
         "args": [
           "--tpm-path", "127.0.0.1:2321",
-          "--tpmURI", "tpm://ek?pub=LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUFqOFoyRDdocDZoeHhhazhJUGRGdQpJcVJUd3NRQml5Z2ZSVTh0QXJtbXFrREhnYmQ1NlRzUkZSeGtHaFBNUG53V2pVZ1lMeW5yeFYwRHhaK1liRTZICjRkbVExVGxRbTlBSVV0TnFkeEJDcEhXZUJvUC96K215bHQySTV5dlJIYVR6Zlk4dWtTWjNnTk5RR0x6Z2xqZTMKek05N0JtZUtwUzVRSE9RWHZZTjM2WkNxZ0RoREx1eExyQkh5SnE0MDVpOUllT2kxU1pkZUdyK1A0T0QvaGFOcwpnVS9yd2M5UStEVzRnZWp6VVJJb3ovWVc4S09BSzZBTERXS0gvVWRTMWkvZUdvS3VsczhUczNOVkhEQ2ZyZVpCCnYvdHhnQnRaNWZaVWYvZ2RFczNFVlJyK1BSL0hGRGlsUHBQemRIUUE4RlBRckhHbjlZREZ4VDdFdFhvS0RKN1EKaFFJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==&pcrs=MDowMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwCg=="
+          "--tpmURI", "tpm://ek?pub=LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUFqOFoyRDdocDZoeHhhazhJUGRGdQpJcVJUd3NRQml5Z2ZSVTh0QXJtbXFrREhnYmQ1NlRzUkZSeGtHaFBNUG53V2pVZ1lMeW5yeFYwRHhaK1liRTZICjRkbVExVGxRbTlBSVV0TnFkeEJDcEhXZUJvUC96K215bHQySTV5dlJIYVR6Zlk4dWtTWjNnTk5RR0x6Z2xqZTMKek05N0JtZUtwUzVRSE9RWHZZTjM2WkNxZ0RoREx1eExyQkh5SnE0MDVpOUllT2kxU1pkZUdyK1A0T0QvaGFOcwpnVS9yd2M5UStEVzRnZWp6VVJJb3ovWVc4S09BSzZBTERXS0gvVWRTMWkvZUdvS3VsczhUczNOVkhEQ2ZyZVpCCnYvdHhnQnRaNWZaVWYvZ2RFczNFVlJyK1BSL0hGRGlsUHBQemRIUUE4RlBRckhHbjlZREZ4VDdFdFhvS0RKN1EKaFFJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg=="
         ]
       }
     },
-    "grpc-keyprovider": {
+    "grpc-tpm-keyprovider": {
       "grpc": "localhost:50051"
     }
   }
@@ -481,6 +564,8 @@ edit `example/config.toml` the stream processor to point to your config file:
     env = ["OCICRYPT_KEYPROVIDER_CONFIG=/path/to/ocicrypt-tpm-keyprovider/example/ocicrypt.json"]
 ```
 
+Start containerd:
+
 ```bash
 sudo /usr/bin/containerd -c config.toml
 ```
@@ -496,3 +581,30 @@ sudo  nerdctl --insecure-registry  --debug-full \
    --address /tmp/run/containerd/containerd.sock run -ti \
     registry.domain.com:5000/app:encrypted
 ```
+
+#### Background
+
+[OCICrypt](https://github.com/containers/ocicrypt) includes specifications to encrypt an OCI Container image and within that, the keyprovider protocol allows wrapping of the actual key used to encrypt the layer to an external binary.
+
+The binary in this question accepts a keyprovider request and inturn perform two further rounds of envelope encryption where the innermost key is bound to the TPM.
+
+Basically, TPM wraps the symmetric key that is used to encrypt the layer itself.
+
+This sample is based off of the [simple-oci-keyprovider](https://github.com/lumjjb/simple-ocicrypt-keyprovider.git) repo which demonstrates the protocol involved.
+
+For more information, see 
+
+- [Advancing container image security with encrypted container images](https://developer.ibm.com/articles/advancing-image-security-encrypted-container-images/)
+- [Enabling advanced key usage and management in encrypted container images](https://developer.ibm.com/articles/enabling-advanced-key-usage-and-management-in-encrypted-container-images/)
+- [Container Image Encryption & Decryption in the CoCo project](https://medium.com/kata-containers/confidential-containers-and-encrypted-container-images-fc4cdb332dec)
+- [OCICrypt Container Image KMS Provider](https://github.com/salrashid123/ocicrypt-kms-keyprovider)
+
+`ocicrypt` comes with default support for [PKCS11 support](https://github.com/containers/ocicrypt/blob/main/docs/pkcs11.md) already and you are free to apply a [TPM PKCS-11](https://github.com/tpm2-software/tpm2-pkcs11).  However, the specific path used by the ocicrypt utilizes an RSA Public key associated to a key derived from the `Storage Root Key (SRK)`.  Its similar to [this](https://github.com/salrashid123/tpm2/tree/master/encrypt_with_tpm_rsa) procedure.
+
+While using the PKCS interface should work, the child RSA key should be attested and associated with the specific TPM first (i.,e you need to do remote attestation and the AK needs to certify the child key).  You also need to install the PKCS module on the target system...which is a bit of a pain.
+
+This repo on the other hand uses the `Endorsement Publickey (EKPub)` directly to wrap an inner encryption key which is itself encrypts the oci metadata for the container image.
+
+Basically, its a bit easier to use the EKPub because its usually something you can derive from a TPM Public x509 certificate (`EKCert`).
+
+If a user has the EKPub key, you can encrypt some data such that *it can only* be decrypted on that TPM alone (nowhere else).

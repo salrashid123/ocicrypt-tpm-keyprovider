@@ -13,16 +13,13 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/url"
 	"os"
-	"slices"
 	"strings"
 
 	"flag"
 
 	"github.com/containers/ocicrypt/keywrap/keyprovider"
-	"github.com/google/go-tpm/tpmutil"
 	wrapping "github.com/hashicorp/go-kms-wrapping/v2"
 	tpmwrap "github.com/salrashid123/go-tpm-wrapping"
 
@@ -35,19 +32,9 @@ const (
 
 var (
 	tpmPath  = flag.String("tpm-path", "/dev/tpmrm0", "Path to the TPM device (character device or a Unix socket).")
-	tpmURI   = flag.String("tpmURI", "", "Path to TPM URI")
+	tpmURI   = flag.String("tpmURI", "", "TPM URI")
 	debugLog = flag.String("debugLog", "", "Path to debuglog")
 )
-
-var TPMDEVICES = []string{"/dev/tpm0", "/dev/tpmrm0"}
-
-func openTPM(path string) (io.ReadWriteCloser, error) {
-	if slices.Contains(TPMDEVICES, path) {
-		return tpmutil.OpenTPM(path)
-	} else {
-		return net.Dial("tcp", path)
-	}
-}
 
 // note the SessionKey is an AESGCM key that is generated entirely within the code
 //  the seession key is what encrypts the ocicrypt request and the sessionKey is itself
@@ -119,11 +106,11 @@ func WrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error) {
 
 	_, ok := keyP.KeyWrapParams.Ec.Parameters[tpmCryptName]
 	if !ok {
-		return nil, fmt.Errorf("provider must be formatted as provider:tpm:tpm://ek?&pub=base64(ekpem)&pcrs=[pcrlist] not set, got %s", keyP.KeyWrapParams.Ec.Parameters[tpmCryptName])
+		return nil, fmt.Errorf("provider must be formatted as provider:tpm:tpm://ek?&pub=base64(ekpem) not set, got %s", keyP.KeyWrapParams.Ec.Parameters[tpmCryptName])
 	}
 
 	if len(keyP.KeyWrapParams.Ec.Parameters[tpmCryptName]) == 0 {
-		return nil, fmt.Errorf("provider must be formatted as provider:tpm:tpm://ek?&pub=base64(ekpem)&pcrs=[pcrlist] got %s", keyP.KeyWrapParams.Ec.Parameters[tpmCryptName])
+		return nil, fmt.Errorf("provider must be formatted as provider:tpm:tpm://ek?&pub=base64(ekpem) got %s", keyP.KeyWrapParams.Ec.Parameters[tpmCryptName])
 	}
 
 	// get the first configuration
@@ -132,7 +119,7 @@ func WrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error) {
 	// parse the uri
 	u, err := url.Parse(string(tpmURI))
 	if err != nil {
-		return nil, fmt.Errorf("error parsing Provider URL must be  provider:tpm:tpm://ek?pt&pub=base64(ekpem)&pcrs=[pcrlist] got %s", tpmURI)
+		return nil, fmt.Errorf("error parsing Provider URL must be  provider:tpm:tpm://ek?pt&pub=base64(ekpem) got %s", tpmURI)
 	}
 	if u.Scheme != tpmCryptName {
 		return nil, fmt.Errorf("error parsing Provider URL: unrecognized scheme got %s", u.Scheme)
@@ -164,9 +151,16 @@ func WrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error) {
 	if m["userAuth"] != nil {
 		userAuthBytes, err := base64.StdEncoding.DecodeString(m["userAuth"][0])
 		if err != nil {
-			return nil, fmt.Errorf("error parsing pcr encoding: %v", err)
+			return nil, fmt.Errorf("error parsing decoding userAuth: %v", err)
 		}
 		userAuth = strings.TrimSuffix(string(userAuthBytes), "\n")
+
+		// remove the userAuth parameter from the tpmURI since this gets encoded
+		// into the encrypted layer's metadata and we don't want the password to get seen
+		q := u.Query()
+		q.Del("userAuth")
+		u.RawQuery = q.Encode()
+		tpmURI = []byte(u.String())
 	}
 
 	isH2Parent := false
@@ -177,6 +171,14 @@ func WrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error) {
 		}
 	}
 
+	var aad []byte
+	if m["aad"] != nil {
+		aad = []byte(m["aad"][0])
+		if *debugLog != "" {
+			log.Printf("AAD: %s\n", m["aad"][0])
+		}
+	}
+
 	// block, _ := pem.Decode(pubPEMData)
 	// pub, err := x509.ParsePKIXPublicKey(block.Bytes)
 	// if err != nil {
@@ -184,6 +186,7 @@ func WrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error) {
 	// }
 
 	sessionKey := make([]byte, 32)
+	// if you wanted to go overboard https://github.com/salrashid123/tpmrand
 	_, err = rand.Read(sessionKey)
 	if err != nil {
 		return nil, fmt.Errorf("unable to generate sessionkey: %v", err)
@@ -203,9 +206,7 @@ func WrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error) {
 		return nil, fmt.Errorf("error creating wrapper %v", err)
 	}
 
-	//wrapper.SetConfig(ctx, tpmwrap.WithDebug(true))
-
-	blobInfo, err := wrapper.Encrypt(ctx, sessionKey)
+	blobInfo, err := wrapper.Encrypt(ctx, sessionKey, wrapping.WithAad(aad))
 	if err != nil {
 		return nil, fmt.Errorf("error encrypting %v", err)
 	}
@@ -215,10 +216,13 @@ func WrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error) {
 		return nil, fmt.Errorf("error marshalling bytes %v", err)
 	}
 
-	var prettyJSON bytes.Buffer
-	err = json.Indent(&prettyJSON, encodedBlob, "", "\t")
-	if err != nil {
-		return nil, fmt.Errorf("error marshalling json %v", err)
+	if *debugLog != "" {
+		var prettyJSON bytes.Buffer
+		err = json.Indent(&prettyJSON, encodedBlob, "", "\t")
+		if err != nil {
+			return nil, fmt.Errorf("error marshalling json %v", err)
+		}
+		log.Printf("TPM wrapped sessionKey: %s\n", prettyJSON.String())
 	}
 
 	c, err := aes.NewCipher(sessionKey)
@@ -276,7 +280,7 @@ func UnwrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error)
 	_, ok := keyP.KeyUnwrapParams.Dc.Parameters[tpmCryptName]
 	if ok {
 		if len(keyP.KeyUnwrapParams.Dc.Parameters[tpmCryptName]) == 0 && apkt.KeyUrl == "" {
-			return nil, errors.New("decrypt Provider must be formatted as tpm://ek?pub=$H2PUB&pcrs=$PCRLIST")
+			return nil, errors.New("decrypt Provider must be formatted as tpm://ek?pub=$H2PUB")
 		}
 		tpmURI = string(keyP.KeyUnwrapParams.Dc.Parameters[tpmCryptName][0])
 	}
@@ -285,9 +289,9 @@ func UnwrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error)
 		return nil, errors.New("tpmURI cannot be nil")
 	}
 
-	if tpmURI != apkt.KeyUrl {
-		return nil, fmt.Errorf("tpmURI parameter and keyURL in structure are different parameter [%s], keyURL [%s]", tpmURI, apkt.KeyUrl)
-	}
+	// if tpmURI != apkt.KeyUrl {
+	// 	return nil, fmt.Errorf("tpmURI parameter and keyURL in structure are different parameter [%s], keyURL [%s]", tpmURI, apkt.KeyUrl)
+	// }
 
 	// parse the uri
 	u, err := url.Parse(string(tpmURI))
@@ -301,12 +305,6 @@ func UnwrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing Provider URL: %v", err)
 	}
-
-	// rwc, err := tpm2.OpenTPM(*tpmPath)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("error: can't open TPM %s: %v", *tpmPath, err)
-	// }
-	// defer rwc.Close()
 
 	if m["pub"] == nil {
 		return nil, errors.New("error  /pub/ value must be set")
@@ -325,21 +323,28 @@ func UnwrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error)
 		pcrValues = strings.TrimSuffix(string(pcrValuesbytes), "\n")
 	}
 
-	// todo: find some way to use userAuth
-	// userAuth := ""
-	// if m["userAuth"] != nil {
-	// 	userAuthBytes, err := base64.StdEncoding.DecodeString(m["userAuth"][0])
-	// 	if err != nil {
-	// 		return nil, fmt.Errorf("error parsing pcr encoding: %v", err)
-	// 	}
-	// 	userAuth = strings.TrimSuffix(string(userAuthBytes), "\n")
-	// }
+	userAuth := ""
+	if m["userAuth"] != nil {
+		userAuthBytes, err := base64.StdEncoding.DecodeString(m["userAuth"][0])
+		if err != nil {
+			return nil, fmt.Errorf("error parsing pcr encoding: %v", err)
+		}
+		userAuth = strings.TrimSuffix(string(userAuthBytes), "\n")
+	}
 
 	isH2Parent := false
 	if m["parentKeyType"] != nil {
 		parentKeyType := m["parentKeyType"][0]
 		if parentKeyType == "H2" {
 			isH2Parent = true
+		}
+	}
+
+	var aad []byte
+	if m["aad"] != nil {
+		aad = []byte(m["aad"][0])
+		if *debugLog != "" {
+			log.Printf("AAD: %s\n", m["aad"][0])
 		}
 	}
 
@@ -350,32 +355,29 @@ func UnwrapKey(keyP keyprovider.KeyProviderKeyWrapProtocolInput) ([]byte, error)
 		tpmwrap.WithTPMPath(*tpmPath),
 		tpmwrap.WithEncryptingPublicKey(hex.EncodeToString(pubPEMData)),
 		tpmwrap.WithPCRValues(pcrValues),
-		//tpmwrap.WithUserAuth(userAuth),
+		tpmwrap.WithUserAuth(userAuth),
 		tpmwrap.WithParentKeyH2(isH2Parent),
 	)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating wrapper %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("error creating wrapper %v\n", err)
 	}
 
 	newBlobInfo := &wrapping.BlobInfo{}
 	err = protojson.Unmarshal(encryptedSessionKey, newBlobInfo)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error unmarshalling %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("error unmarshalling %v\n", err)
 	}
 
-	sessionKey, err := wrapper.Decrypt(ctx, newBlobInfo)
+	sessionKey, err := wrapper.Decrypt(ctx, newBlobInfo, wrapping.WithAad(aad))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error decrypting %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("error decrypting %v\n", err)
 	}
 
 	c, err := aes.NewCipher(sessionKey)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create AES Cipher data: %v", err)
 	}
-	gcm, _ := cipher.NewGCM(c)
+	gcm, err := cipher.NewGCM(c)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create GCM: %v", err)
 	}

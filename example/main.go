@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"net/http"
-	"os"
 
 	"github.com/gorilla/mux"
 	"golang.org/x/net/http2"
@@ -19,11 +18,6 @@ func gethandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 
-	dat, err := os.ReadFile("config.json")
-	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("config %s\n", string(dat))
 	r := mux.NewRouter()
 	r.Methods(http.MethodGet).Path("/").HandlerFunc(gethandler)
 
@@ -33,7 +27,7 @@ func main() {
 	}
 	http2.ConfigureServer(server, &http2.Server{})
 	fmt.Println("Starting HTTP Server..")
-	err = server.ListenAndServe()
+	err := server.ListenAndServe()
 
 	fmt.Printf("Unable to start Server %v", err)
 

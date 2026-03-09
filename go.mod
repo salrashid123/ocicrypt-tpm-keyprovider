@@ -1,4 +1,4 @@
-module github.com/salrashid123/ocicrypt-tpm-keyprovider/plugin
+module github.com/salrashid123/ocicrypt-tpm-keyprovider
 
 go 1.24.0
 

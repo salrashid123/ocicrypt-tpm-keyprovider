@@ -32,7 +32,6 @@ Other variants of ocicrypt key wrapping:
 You can build the ocicrypt binary or grpc cserver directly from this repo or from the `Releases` section
 
 ```bash
-cd plugin/
 go build  -o /tmp/tpm_oci_crypt .
 ```
 
@@ -531,7 +530,6 @@ sudo make install  ##    install to /usr/local/bin/ctd-decoder
 * build `tpm_oci_crypt` 
 
 ```bash
-cd plugin
 go build -o /tmp/tpm_oci_crypt .
 ```
 

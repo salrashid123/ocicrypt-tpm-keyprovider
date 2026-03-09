@@ -9,7 +9,6 @@ release:
   extra_files:
 builds:
   - id: ocicrypt-tpm-keyprovider
-    main: plugin
     goos:
       - linux
       - darwin
